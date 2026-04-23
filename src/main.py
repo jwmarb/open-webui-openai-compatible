@@ -109,11 +109,12 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
             return JSONResponse(content=err, status_code=502)
 
         async def event_stream():
-            if first_chunk is not None:
-                yield first_chunk
             try:
+                if first_chunk is not None:
+                    yield first_chunk
                 async for chunk in stream_gen:
                     yield chunk
+                logger.debug("Stream completed normally for model=%s", model)
             except httpx.HTTPStatusError as exc:
                 err = create_openai_error(
                     "Upstream request failed", "api_error", exc.response.status_code,
@@ -141,6 +142,16 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
                 )
                 yield f"data: {json.dumps(err)}\n\n".encode()
                 yield b"data: [DONE]\n\n"
+            except BaseException as exc:
+                # CancelledError (client disconnect) and other BaseExceptions.
+                # Log so silent stream deaths become visible.
+                logger.warning(
+                    "Stream interrupted by %s for model=%s",
+                    type(exc).__name__, model,
+                )
+                raise
+            finally:
+                await stream_gen.aclose()
 
         return StreamingResponse(
             event_stream(),
