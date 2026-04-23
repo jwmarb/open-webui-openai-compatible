@@ -28,6 +28,36 @@ _SSE_HEADERS: Final[dict[str, str]] = {
     "X-Accel-Buffering": "no",
 }
 
+_FINISH_REASON_NEEDLE = b'"finish_reason"'
+_FINISH_REASON_NULL = b'"finish_reason":null'
+_FINISH_REASON_NONE = b'"finish_reason": null'
+
+
+def _extract_finish_reason(chunk: bytes) -> str | None:
+    """Extract finish_reason from an SSE data chunk, if present and non-null.
+
+    Scans raw bytes to avoid JSON parsing on every chunk.  Only parses JSON
+    for the rare chunk that actually contains a non-null finish_reason.
+    """
+    if _FINISH_REASON_NEEDLE not in chunk:
+        return None
+    if _FINISH_REASON_NULL in chunk or _FINISH_REASON_NONE in chunk:
+        return None
+    for line in chunk.split(b"\n"):
+        if not line.startswith(b"data: ") or line.strip() == b"data: [DONE]":
+            continue
+        try:
+            payload = json.loads(line[6:])
+            choices = payload.get("choices") or []
+            for choice in choices:
+                reason = choice.get("finish_reason")
+                if reason is not None:
+                    return reason
+        except (json.JSONDecodeError, AttributeError):
+            continue
+    return None
+
+
 __all__ = ["app"]
 
 
@@ -109,12 +139,18 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
             return JSONResponse(content=err, status_code=502)
 
         async def event_stream():
+            finish_reason: str | None = None
             try:
                 if first_chunk is not None:
+                    finish_reason = _extract_finish_reason(first_chunk) or finish_reason
                     yield first_chunk
                 async for chunk in stream_gen:
+                    finish_reason = _extract_finish_reason(chunk) or finish_reason
                     yield chunk
-                logger.debug("Stream completed normally for model=%s", model)
+                logger.info(
+                    "Stream ended for model=%s finish_reason=%s",
+                    model, finish_reason,
+                )
             except httpx.HTTPStatusError as exc:
                 err = create_openai_error(
                     "Upstream request failed", "api_error", exc.response.status_code,
