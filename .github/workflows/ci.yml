@@ -17,6 +17,19 @@ jobs:
       - run: pip install ruff
       - run: ruff check src/ tests/
 
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[dev]"
+      - run: pyright src/
+        env:
+          OPEN_WEBUI_URL: "https://typecheck.example.com"
+          USER_TOKEN: "typecheck-token"
+
   unit-tests:
     runs-on: ubuntu-latest
     steps:
@@ -31,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     # Only run when secrets are available (skipped on fork PRs)
     if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
-    needs: [lint, unit-tests]
+    needs: [lint, typecheck, unit-tests]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
