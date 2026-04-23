@@ -1,34 +1,49 @@
+"""Async HTTP client for Open WebUI upstream API."""
+
 from __future__ import annotations
 
 import logging
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any, overload
 
 import httpx
 
-from .settings import settings
+_MAX_ERROR_LOG_CHARS = 500
 
 logger = logging.getLogger(__name__)
 
+__all__ = ["WebClient"]
+
 
 class WebClient:
-    """Async HTTP client for Open WebUI upstream API."""
+    """Async HTTP client wrapping Open WebUI's internal API endpoints."""
 
-    def __init__(self) -> None:
+    def __init__(self, base_url: str, token: str) -> None:
         self._client = httpx.AsyncClient(
-            base_url=settings.open_webui_url,
+            base_url=base_url,
             timeout=httpx.Timeout(120.0, connect=10.0),
-            headers={"Authorization": f"Bearer {settings.user_token}"},
+            headers={"Authorization": f"Bearer {token}"},
         )
 
-    async def get_models(self) -> dict:
+    async def get_models(self) -> dict[str, Any]:
         """GET /api/models — fetch available models from Open WebUI."""
         resp = await self._client.get("/api/models")
         resp.raise_for_status()
         return resp.json()
 
+    @overload
     async def post_chat_completion(
-        self, body: dict, *, stream: bool = False,
-    ) -> dict | AsyncIterator[bytes]:
+        self, body: dict[str, Any], *, stream: bool = False,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    async def post_chat_completion(
+        self, body: dict[str, Any], *, stream: bool = True,
+    ) -> AsyncIterator[bytes]: ...
+
+    async def post_chat_completion(
+        self, body: dict[str, Any], *, stream: bool = False,
+    ) -> dict[str, Any] | AsyncIterator[bytes]:
         """POST /api/chat/completions — JWT auth via Bearer header.
 
         When stream=True, returns an async iterator of raw bytes preserving
@@ -41,12 +56,12 @@ class WebClient:
             logger.error(
                 "Upstream %s: %s",
                 resp.status_code,
-                resp.text[:500],
+                resp.text[:_MAX_ERROR_LOG_CHARS],
             )
         resp.raise_for_status()
         return resp.json()
 
-    async def _stream_chat_raw(self, body: dict) -> AsyncIterator[bytes]:
+    async def _stream_chat_raw(self, body: dict[str, Any]) -> AsyncIterator[bytes]:
         """Yield raw byte chunks from upstream, preserving SSE framing exactly."""
         async with self._client.stream(
             "POST", "/api/chat/completions", json=body,
@@ -56,7 +71,7 @@ class WebClient:
                 logger.error(
                     "Upstream stream %s: %s",
                     resp.status_code,
-                    error_body[:500],
+                    error_body[:_MAX_ERROR_LOG_CHARS],
                 )
             resp.raise_for_status()
             async for chunk in resp.aiter_raw():

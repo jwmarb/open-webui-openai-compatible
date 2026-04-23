@@ -1,7 +1,15 @@
+"""Pydantic response types matching the OpenAI API schema."""
+
+from __future__ import annotations
+
+from typing import Literal
+
 from pydantic import BaseModel
 
 
 class OpenAIModel(BaseModel):
+    """A single model entry in the OpenAI /v1/models response."""
+
     id: str
     object: str = "model"
     created: int = 0
@@ -9,24 +17,39 @@ class OpenAIModel(BaseModel):
 
 
 class OpenAIModelList(BaseModel):
+    """Response shape for GET /v1/models."""
+
     object: str = "list"
     data: list[OpenAIModel]
 
 
+class ThinkingConfig(BaseModel):
+    """Claude thinking configuration injected into chat completion requests."""
+
+    type: Literal["enabled", "adaptive"]
+    budget_tokens: int | None = None
+
+
 class ChatCompletionChoice(BaseModel):
+    """A single choice in a chat completion response."""
+
     index: int = 0
-    message: dict | None = None
-    delta: dict | None = None
+    message: dict[str, object] | None = None
+    delta: dict[str, object] | None = None
     finish_reason: str | None = None
 
 
 class UsageInfo(BaseModel):
+    """Token usage statistics for a chat completion."""
+
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
 
 
 class ChatCompletionResponse(BaseModel):
+    """Response shape for POST /v1/chat/completions (non-streaming)."""
+
     id: str = ""
     object: str = "chat.completion"
     created: int = 0
@@ -36,10 +59,14 @@ class ChatCompletionResponse(BaseModel):
 
 
 class OpenAIErrorDetail(BaseModel):
+    """Error detail nested inside an OpenAI error response."""
+
     message: str
     type: str = "invalid_request_error"
     code: int | None = None
 
 
 class OpenAIErrorResponse(BaseModel):
+    """Top-level OpenAI-compatible error response."""
+
     error: OpenAIErrorDetail

@@ -1,47 +1,53 @@
+"""FastAPI proxy exposing OpenAI-compatible endpoints backed by Open WebUI."""
+
 from __future__ import annotations
 
 import json
 import logging
 from contextlib import asynccontextmanager
+from typing import Any, Final
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-import httpx
 
 from .client import WebClient
+from .settings import settings
 from .translator import (
-    translate_models_response,
-    create_openai_error,
-    sanitize_chat_body,
-    resolve_thinking_model,
     apply_thinking_params,
+    create_openai_error,
+    resolve_thinking_model,
+    sanitize_chat_body,
+    translate_models_response,
 )
 
 logger = logging.getLogger(__name__)
 
-_SSE_HEADERS = {
+_SSE_HEADERS: Final[dict[str, str]] = {
     "Cache-Control": "no-cache",
     "X-Accel-Buffering": "no",
 }
 
+__all__ = ["app"]
+
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    app.state.web_client = WebClient()
+async def _lifespan(app: FastAPI):
+    app.state.web_client = WebClient(settings.open_webui_url, settings.user_token)
     yield
     await app.state.web_client.aclose()
 
 
-app = FastAPI(title="OpenAI-Compatible Proxy", lifespan=lifespan)
+app = FastAPI(title="OpenAI-Compatible Proxy", lifespan=_lifespan)
 
 
 @app.get("/health")
-async def health():
+async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @app.get("/v1/models")
-async def models(request: Request):
+async def models(request: Request) -> JSONResponse:
     try:
         raw = await request.app.state.web_client.get_models()
         translated = translate_models_response(raw)
@@ -54,9 +60,9 @@ async def models(request: Request):
         return JSONResponse(content=err, status_code=502)
 
 
-@app.post("/v1/chat/completions")
-async def chat_completions(request: Request):
-    body = sanitize_chat_body(await request.json())
+@app.post("/v1/chat/completions", response_model=None)
+async def chat_completions(request: Request) -> JSONResponse | StreamingResponse:
+    body: dict[str, Any] = sanitize_chat_body(await request.json())
     logger.debug("Incoming request body keys: %s", list(body.keys()))
 
     model = body.get("model", "")
