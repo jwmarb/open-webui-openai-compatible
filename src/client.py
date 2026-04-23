@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import AsyncIterator
 
 import httpx
 
 from .settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 class WebClient:
@@ -30,6 +33,12 @@ class WebClient:
         if stream:
             return self._stream_chat(body)
         resp = await self._client.post("/api/chat/completions", json=body)
+        if resp.is_error:
+            logger.error(
+                "Upstream %s: %s",
+                resp.status_code,
+                resp.text[:500],
+            )
         resp.raise_for_status()
         return resp.json()
 
@@ -38,6 +47,13 @@ class WebClient:
         async with self._client.stream(
             "POST", "/api/chat/completions", json=body,
         ) as resp:
+            if resp.is_error:
+                error_body = await resp.aread()
+                logger.error(
+                    "Upstream stream %s: %s",
+                    resp.status_code,
+                    error_body[:500],
+                )
             resp.raise_for_status()
             async for line in resp.aiter_lines():
                 yield line

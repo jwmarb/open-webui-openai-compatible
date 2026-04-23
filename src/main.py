@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -8,7 +9,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
 
 from .client import WebClient
-from .translator import translate_models_response, create_openai_error
+from .translator import translate_models_response, create_openai_error, sanitize_chat_body
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -42,7 +45,8 @@ async def models(request: Request):
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    body = await request.json()
+    body = sanitize_chat_body(await request.json())
+    logger.debug("Incoming request body keys: %s", list(body.keys()))
 
     is_stream = body.get("stream") is True
 

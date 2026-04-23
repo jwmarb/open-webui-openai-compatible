@@ -17,6 +17,42 @@ def translate_models_response(raw: dict) -> dict:
     return {"object": "list", "data": data}
 
 
+# https://platform.openai.com/docs/api-reference/chat/create
+OPENAI_CHAT_PARAMS: set[str] = {
+    "model",
+    "messages",
+    "stream",
+    "stream_options",
+    "temperature",
+    "top_p",
+    "n",
+    "stop",
+    "max_tokens",
+    "max_completion_tokens",
+    "presence_penalty",
+    "frequency_penalty",
+    "logit_bias",
+    "logprobs",
+    "top_logprobs",
+    "user",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "response_format",
+    "seed",
+    "service_tier",
+    "metadata",
+    "store",
+    "reasoning_effort",
+    "functions",
+    "function_call",
+}
+
+
+def sanitize_chat_body(body: dict) -> dict:
+    return {k: v for k, v in body.items() if k in OPENAI_CHAT_PARAMS}
+
+
 def create_openai_error(
     message: str,
     error_type: str = "invalid_request_error",

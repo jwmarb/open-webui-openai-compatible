@@ -237,7 +237,7 @@ class TestChatCompletionsEndpoint:
                     },
                 )
                 assert response.status_code == 200
-                lines = [l for l in response.text.strip().split("\n") if l.startswith("data: ")]
+                lines = [line for line in response.text.strip().split("\n") if line.startswith("data: ")]
                 assert lines[0] == "data: {\"chunk\": 1}"
                 assert lines[1] == "data: {\"chunk\": 2}"
                 error_payload = json.loads(lines[2].removeprefix("data: "))

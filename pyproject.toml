@@ -18,6 +18,7 @@ dev = [
     "ruff",
     "pytest",
     "pytest-asyncio",
+    "openai",
 ]
 
 [build-system]

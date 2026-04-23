@@ -1,4 +1,4 @@
-from src.translator import translate_models_response, create_openai_error
+from src.translator import translate_models_response, create_openai_error, sanitize_chat_body
 
 
 class TestTranslateModelsResponse:
@@ -90,3 +90,70 @@ class TestCreateOpenAIError:
                 "code": 502,
             }
         }
+
+
+class TestSanitizeChatBody:
+
+    def test_keeps_standard_openai_fields(self):
+        body = {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "temperature": 0.7,
+            "tools": [],
+            "tool_choice": "auto",
+        }
+        assert sanitize_chat_body(body) == body
+
+    def test_strips_litellm_fields(self):
+        body = {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "extra_body": {},
+            "extra_headers": {},
+            "api_base": "http://example.com",
+            "api_key": "sk-test",
+            "custom_llm_provider": "openai",
+            "litellm_call_id": "abc-123",
+            "litellm_logging_obj": {},
+        }
+        result = sanitize_chat_body(body)
+        assert result == {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+    def test_empty_body(self):
+        assert sanitize_chat_body({}) == {}
+
+    def test_preserves_all_openai_params(self):
+        body = {
+            "model": "gpt-4",
+            "messages": [],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "temperature": 0.5,
+            "top_p": 0.9,
+            "n": 1,
+            "stop": ["\n"],
+            "max_tokens": 100,
+            "max_completion_tokens": 100,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0,
+            "logit_bias": {},
+            "logprobs": True,
+            "top_logprobs": 5,
+            "user": "user-1",
+            "tools": [],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+            "response_format": {"type": "json_object"},
+            "seed": 42,
+            "service_tier": "default",
+            "metadata": {},
+            "store": True,
+            "reasoning_effort": "medium",
+            "functions": [],
+            "function_call": "auto",
+        }
+        assert sanitize_chat_body(body) == body
