@@ -43,7 +43,17 @@ Single-package FastAPI proxy. Source lives in `src/`, no sub-packages.
 
 ### Streaming error handling
 
-Streaming uses a first-chunk pre-read pattern: the proxy advances the upstream async generator by one iteration *before* returning `StreamingResponse`. If the upstream rejects immediately (e.g. 400), the proxy returns a proper HTTP error JSON response. Errors that occur mid-stream (after headers are sent) emit SSE error events: `data: {"error": ...}` followed by `data: [DONE]`.
+Streaming uses raw byte passthrough via `httpx.Response.aiter_raw()` to preserve upstream SSE framing exactly, avoiding line-by-line re-parsing overhead. The proxy uses a first-chunk pre-read pattern: it advances the upstream async generator by one iteration *before* returning `StreamingResponse`. If the upstream rejects immediately (e.g. 400), the proxy returns a proper HTTP error JSON response.
+
+Error handling distinguishes specific failure modes:
+- `httpx.HTTPStatusError` → upstream HTTP error (preserves status code)
+- `httpx.ReadTimeout` / `httpx.ConnectTimeout` → 504 with `timeout_error` type
+- `httpx.RemoteProtocolError` / `httpx.ReadError` → 502 connection failure
+- Other exceptions → 502 generic, but **logged with exception type** for debugging
+
+Errors that occur mid-stream (after headers are sent) emit SSE error events: `data: {"error": ...}` followed by `data: [DONE]`.
+
+The `StreamingResponse` includes `Cache-Control: no-cache` and `X-Accel-Buffering: no` headers to prevent reverse proxy (nginx/Caddy) buffering of SSE streams.
 
 ### Claude thinking variants
 

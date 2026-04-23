@@ -19,6 +19,11 @@ from .translator import (
 
 logger = logging.getLogger(__name__)
 
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -67,45 +72,74 @@ async def chat_completions(request: Request):
             body, stream=True
         )
 
-        # Advance to the first yielded line so that errors raised before
-        # any data (e.g. upstream 400 on raise_for_status) surface here
-        # where we can still return a proper HTTP error response.
-        first_line: str | None = None
+        # Pre-read the first chunk so errors raised before any data
+        # (e.g. upstream 400 on raise_for_status) surface here where
+        # we can still return a proper HTTP error response.
+        first_chunk: bytes | None = None
         try:
-            first_line = await anext(stream_gen.__aiter__(), None)
+            first_chunk = await anext(stream_gen.__aiter__(), None)
         except httpx.HTTPStatusError as exc:
             err = create_openai_error(
                 "Upstream request failed", "api_error", exc.response.status_code,
             )
             return JSONResponse(content=err, status_code=exc.response.status_code)
-        except Exception:
+        except (httpx.ReadTimeout, httpx.ConnectTimeout) as exc:
+            logger.error("Upstream timeout during stream pre-read: %s", exc)
+            err = create_openai_error(
+                "Upstream request timed out", "timeout_error", 504,
+            )
+            return JSONResponse(content=err, status_code=504)
+        except (httpx.RemoteProtocolError, httpx.ReadError) as exc:
+            logger.error("Upstream connection error during stream pre-read: %s", exc)
+            err = create_openai_error(
+                "Upstream connection failed", "api_error", 502,
+            )
+            return JSONResponse(content=err, status_code=502)
+        except Exception as exc:
+            logger.exception("Unexpected error during stream pre-read: %s", type(exc).__name__)
             err = create_openai_error(
                 "Upstream service unavailable", "server_error", 502,
             )
             return JSONResponse(content=err, status_code=502)
 
-        async def event_generator():
-            if first_line is not None:
-                yield first_line + "\n"
+        async def event_stream():
+            if first_chunk is not None:
+                yield first_chunk
             try:
-                async for line in stream_gen:
-                    yield line + "\n"
+                async for chunk in stream_gen:
+                    yield chunk
             except httpx.HTTPStatusError as exc:
                 err = create_openai_error(
                     "Upstream request failed", "api_error", exc.response.status_code,
                 )
-                yield f"data: {json.dumps(err)}\n\n"
-                yield "data: [DONE]\n\n"
-            except Exception:
+                yield f"data: {json.dumps(err)}\n\n".encode()
+                yield b"data: [DONE]\n\n"
+            except (httpx.ReadTimeout, httpx.ConnectTimeout) as exc:
+                logger.error("Upstream timeout mid-stream: %s", exc)
+                err = create_openai_error(
+                    "Upstream request timed out", "timeout_error", 504,
+                )
+                yield f"data: {json.dumps(err)}\n\n".encode()
+                yield b"data: [DONE]\n\n"
+            except (httpx.RemoteProtocolError, httpx.ReadError) as exc:
+                logger.error("Upstream connection error mid-stream: %s", exc)
+                err = create_openai_error(
+                    "Upstream connection failed", "api_error", 502,
+                )
+                yield f"data: {json.dumps(err)}\n\n".encode()
+                yield b"data: [DONE]\n\n"
+            except Exception as exc:
+                logger.exception("Unexpected error mid-stream: %s", type(exc).__name__)
                 err = create_openai_error(
                     "Upstream service unavailable", "server_error", 502,
                 )
-                yield f"data: {json.dumps(err)}\n\n"
-                yield "data: [DONE]\n\n"
+                yield f"data: {json.dumps(err)}\n\n".encode()
+                yield b"data: [DONE]\n\n"
 
         return StreamingResponse(
-            event_generator(),
+            event_stream(),
             media_type="text/event-stream",
+            headers=_SSE_HEADERS,
         )
 
     try:

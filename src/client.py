@@ -28,10 +28,14 @@ class WebClient:
 
     async def post_chat_completion(
         self, body: dict, *, stream: bool = False,
-    ) -> dict | AsyncIterator[str]:
-        """POST /api/chat/completions — JWT auth via Bearer header."""
+    ) -> dict | AsyncIterator[bytes]:
+        """POST /api/chat/completions — JWT auth via Bearer header.
+
+        When stream=True, returns an async iterator of raw bytes preserving
+        the upstream SSE framing exactly as received.
+        """
         if stream:
-            return self._stream_chat(body)
+            return self._stream_chat_raw(body)
         resp = await self._client.post("/api/chat/completions", json=body)
         if resp.is_error:
             logger.error(
@@ -42,8 +46,8 @@ class WebClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def _stream_chat(self, body: dict) -> AsyncIterator[str]:
-        """Stream SSE response from /api/chat/completions."""
+    async def _stream_chat_raw(self, body: dict) -> AsyncIterator[bytes]:
+        """Yield raw byte chunks from upstream, preserving SSE framing exactly."""
         async with self._client.stream(
             "POST", "/api/chat/completions", json=body,
         ) as resp:
@@ -55,8 +59,8 @@ class WebClient:
                     error_body[:500],
                 )
             resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                yield line
+            async for chunk in resp.aiter_raw():
+                yield chunk
 
     async def aclose(self) -> None:
         """Close the underlying httpx client."""

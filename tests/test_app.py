@@ -178,6 +178,62 @@ class TestChatCompletionsEndpoint:
                 assert body["error"]["type"] == "api_error"
                 assert body["error"]["code"] == 400
 
+    def test_chat_streaming_timeout_error(self):
+        """Upstream timeout before any data returns HTTP 504."""
+
+        async def fake_post_stream(body, stream=False):
+            async def failing_generator():
+                raise httpx.ReadTimeout("timed out")
+                yield  # noqa: unreachable
+
+            return failing_generator()
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
+
+        with patch("src.main.WebClient", return_value=mock):
+            from fastapi.testclient import TestClient
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "llama-3.1",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "stream": True,
+                    },
+                )
+                assert response.status_code == 504
+                body = response.json()
+                assert body["error"]["type"] == "timeout_error"
+                assert body["error"]["code"] == 504
+
+    def test_chat_streaming_connection_error(self):
+        """Upstream connection error before any data returns HTTP 502."""
+
+        async def fake_post_stream(body, stream=False):
+            async def failing_generator():
+                raise httpx.RemoteProtocolError("connection reset")
+                yield  # noqa: unreachable
+
+            return failing_generator()
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
+
+        with patch("src.main.WebClient", return_value=mock):
+            from fastapi.testclient import TestClient
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "llama-3.1",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "stream": True,
+                    },
+                )
+                assert response.status_code == 502
+                body = response.json()
+                assert body["error"]["type"] == "api_error"
+                assert body["error"]["code"] == 502
+
     def test_chat_streaming_generic_error(self):
         """Generic exception before any data returns HTTP 502."""
 
@@ -213,8 +269,8 @@ class TestChatCompletionsEndpoint:
 
         async def fake_post_stream(body, stream=False):
             async def partial_then_fail():
-                yield "data: {\"chunk\": 1}"
-                yield "data: {\"chunk\": 2}"
+                yield b'data: {"chunk": 1}\n\n'
+                yield b'data: {"chunk": 2}\n\n'
                 raise httpx.HTTPStatusError(
                     "Internal Server Error",
                     request=httpx.Request("POST", "/"),
@@ -238,9 +294,41 @@ class TestChatCompletionsEndpoint:
                 )
                 assert response.status_code == 200
                 lines = [line for line in response.text.strip().split("\n") if line.startswith("data: ")]
-                assert lines[0] == "data: {\"chunk\": 1}"
-                assert lines[1] == "data: {\"chunk\": 2}"
+                assert lines[0] == 'data: {"chunk": 1}'
+                assert lines[1] == 'data: {"chunk": 2}'
                 error_payload = json.loads(lines[2].removeprefix("data: "))
                 assert error_payload["error"]["type"] == "api_error"
                 assert error_payload["error"]["code"] == 500
                 assert lines[3] == "data: [DONE]"
+
+    def test_chat_streaming_mid_stream_timeout(self):
+        """Timeout after successful chunks emits SSE error event with timeout type."""
+        import json
+
+        async def fake_post_stream(body, stream=False):
+            async def partial_then_timeout():
+                yield b'data: {"chunk": 1}\n\n'
+                raise httpx.ReadTimeout("timed out")
+
+            return partial_then_timeout()
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
+
+        with patch("src.main.WebClient", return_value=mock):
+            from fastapi.testclient import TestClient
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "llama-3.1",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "stream": True,
+                    },
+                )
+                assert response.status_code == 200
+                lines = [line for line in response.text.strip().split("\n") if line.startswith("data: ")]
+                assert lines[0] == 'data: {"chunk": 1}'
+                error_payload = json.loads(lines[1].removeprefix("data: "))
+                assert error_payload["error"]["type"] == "timeout_error"
+                assert error_payload["error"]["code"] == 504
+                assert lines[2] == "data: [DONE]"
