@@ -9,7 +9,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
 
 from .client import WebClient
-from .translator import translate_models_response, create_openai_error, sanitize_chat_body
+from .translator import (
+    translate_models_response,
+    create_openai_error,
+    sanitize_chat_body,
+    resolve_thinking_model,
+    apply_thinking_params,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +53,12 @@ async def models(request: Request):
 async def chat_completions(request: Request):
     body = sanitize_chat_body(await request.json())
     logger.debug("Incoming request body keys: %s", list(body.keys()))
+
+    model = body.get("model", "")
+    base_model, thinking_config = resolve_thinking_model(model)
+    if thinking_config is not None:
+        body["model"] = base_model
+        body = apply_thinking_params(body, thinking_config)
 
     is_stream = body.get("stream") is True
 

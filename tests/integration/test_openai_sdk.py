@@ -154,3 +154,44 @@ class TestChatSDK:
         assert tc["name"] == "get_weather"
         args = json.loads(tc["arguments"])
         assert "location" in args
+
+
+class TestThinkingVariantsSDK:
+
+    def test_models_list_includes_thinking_variants(self, openai_client):
+        models = openai_client.models.list()
+        ids = [m.id for m in models.data]
+        claude_base_ids = [i for i in ids if "claude" in i and ":" not in i]
+        assert len(claude_base_ids) > 0, "No Claude models found"
+        for base_id in claude_base_ids:
+            assert f"{base_id}:extended" in ids, f"Missing :extended variant for {base_id}"
+
+    def test_extended_thinking_non_streaming(self, openai_client):
+        models = openai_client.models.list()
+        extended_ids = [m.id for m in models.data if m.id.endswith(":extended")]
+        assert len(extended_ids) > 0
+        model = extended_ids[0]
+
+        resp = openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "What is 15 * 37?"}],
+        )
+        assert resp.choices[0].message.content is not None
+        assert resp.choices[0].finish_reason == "stop"
+
+    def test_extended_thinking_streaming(self, openai_client):
+        models = openai_client.models.list()
+        extended_ids = [m.id for m in models.data if m.id.endswith(":extended")]
+        assert len(extended_ids) > 0
+        model = extended_ids[0]
+
+        stream = openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "What is 15 * 37?"}],
+            stream=True,
+        )
+        content = ""
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                content += chunk.choices[0].delta.content
+        assert len(content) > 0
