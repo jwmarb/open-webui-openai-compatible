@@ -1,10 +1,11 @@
+from src.models import OpenAIModel, ThinkingConfig
 from src.translator import (
-    translate_models_response,
+    apply_thinking_params,
     create_openai_error,
-    sanitize_chat_body,
     generate_thinking_variants,
     resolve_thinking_model,
-    apply_thinking_params,
+    sanitize_chat_body,
+    translate_models_response,
 )
 
 
@@ -171,34 +172,34 @@ class TestSanitizeChatBody:
 class TestGenerateThinkingVariants:
 
     def test_non_claude_model_no_variants(self):
-        model = {"id": "gpt-4", "object": "model", "created": 0, "owned_by": "OpenAI"}
+        model = OpenAIModel(id="gpt-4", owned_by="OpenAI")
         assert generate_thinking_variants(model) == []
 
     def test_claude_opus_gets_extended_and_adaptive(self):
-        model = {"id": "bedrock-claude-4-6-opus", "object": "model", "created": 0, "owned_by": ""}
+        model = OpenAIModel(id="bedrock-claude-4-6-opus")
         variants = generate_thinking_variants(model)
-        ids = [v["id"] for v in variants]
+        ids = [v.id for v in variants]
         assert ids == ["bedrock-claude-4-6-opus:extended", "bedrock-claude-4-6-opus:adaptive"]
 
     def test_claude_sonnet_gets_extended_and_adaptive(self):
-        model = {"id": "bedrock-claude-4-5-sonnet", "object": "model", "created": 0, "owned_by": ""}
+        model = OpenAIModel(id="bedrock-claude-4-5-sonnet")
         variants = generate_thinking_variants(model)
-        ids = [v["id"] for v in variants]
+        ids = [v.id for v in variants]
         assert ids == ["bedrock-claude-4-5-sonnet:extended", "bedrock-claude-4-5-sonnet:adaptive"]
 
     def test_claude_haiku_gets_extended_only(self):
-        model = {"id": "bedrock-claude-4-5-haiku", "object": "model", "created": 0, "owned_by": ""}
+        model = OpenAIModel(id="bedrock-claude-4-5-haiku")
         variants = generate_thinking_variants(model)
-        ids = [v["id"] for v in variants]
+        ids = [v.id for v in variants]
         assert ids == ["bedrock-claude-4-5-haiku:extended"]
 
     def test_variant_preserves_created_and_owned_by(self):
-        model = {"id": "bedrock-claude-4-6-opus", "object": "model", "created": 1700000000, "owned_by": "Anthropic"}
+        model = OpenAIModel(id="bedrock-claude-4-6-opus", created=1700000000, owned_by="Anthropic")
         variants = generate_thinking_variants(model)
         for v in variants:
-            assert v["created"] == 1700000000
-            assert v["owned_by"] == "Anthropic"
-            assert v["object"] == "model"
+            assert v.created == 1700000000
+            assert v.owned_by == "Anthropic"
+            assert v.object == "model"
 
     def test_models_response_includes_variants(self):
         raw = {"data": [
@@ -224,18 +225,20 @@ class TestResolveThinkingModel:
     def test_extended_suffix_stripped(self):
         base, config = resolve_thinking_model("bedrock-claude-4-6-opus:extended")
         assert base == "bedrock-claude-4-6-opus"
-        assert config["type"] == "enabled"
-        assert config["budget_tokens"] == 32000
+        assert config is not None
+        assert config.type == "enabled"
+        assert config.budget_tokens == 32000
 
     def test_adaptive_suffix_stripped(self):
         base, config = resolve_thinking_model("bedrock-claude-4-5-sonnet:adaptive")
         assert base == "bedrock-claude-4-5-sonnet"
-        assert config == {"type": "adaptive"}
+        assert config == ThinkingConfig(type="adaptive")
 
     def test_haiku_extended_gets_smaller_budget(self):
         base, config = resolve_thinking_model("bedrock-claude-4-5-haiku:extended")
         assert base == "bedrock-claude-4-5-haiku"
-        assert config["budget_tokens"] == 16000
+        assert config is not None
+        assert config.budget_tokens == 16000
 
     def test_non_claude_with_colon_unchanged(self):
         base, config = resolve_thinking_model("some-model:v2")
@@ -247,35 +250,35 @@ class TestApplyThinkingParams:
 
     def test_injects_thinking_config(self):
         body = {"model": "opus", "messages": []}
-        result = apply_thinking_params(body, {"type": "enabled", "budget_tokens": 32000})
+        result = apply_thinking_params(body, ThinkingConfig(type="enabled", budget_tokens=32000))
         assert result["thinking"] == {"type": "enabled", "budget_tokens": 32000}
 
     def test_bumps_max_tokens_when_too_low(self):
         body = {"model": "opus", "messages": [], "max_tokens": 100}
-        result = apply_thinking_params(body, {"type": "enabled", "budget_tokens": 32000})
+        result = apply_thinking_params(body, ThinkingConfig(type="enabled", budget_tokens=32000))
         assert result["max_tokens"] == 64000
 
     def test_preserves_max_tokens_when_sufficient(self):
         body = {"model": "opus", "messages": [], "max_tokens": 128000}
-        result = apply_thinking_params(body, {"type": "enabled", "budget_tokens": 32000})
+        result = apply_thinking_params(body, ThinkingConfig(type="enabled", budget_tokens=32000))
         assert result["max_tokens"] == 128000
 
     def test_sets_max_tokens_when_missing(self):
         body = {"model": "opus", "messages": []}
-        result = apply_thinking_params(body, {"type": "enabled", "budget_tokens": 32000})
+        result = apply_thinking_params(body, ThinkingConfig(type="enabled", budget_tokens=32000))
         assert result["max_tokens"] == 64000
 
     def test_adaptive_sets_min_max_tokens(self):
         body = {"model": "opus", "messages": []}
-        result = apply_thinking_params(body, {"type": "adaptive"})
+        result = apply_thinking_params(body, ThinkingConfig(type="adaptive"))
         assert result["max_tokens"] == 64000
 
     def test_haiku_smaller_min_max_tokens(self):
         body = {"model": "haiku", "messages": [], "max_tokens": 100}
-        result = apply_thinking_params(body, {"type": "enabled", "budget_tokens": 16000})
+        result = apply_thinking_params(body, ThinkingConfig(type="enabled", budget_tokens=16000))
         assert result["max_tokens"] == 32000
 
     def test_does_not_mutate_original(self):
         body = {"model": "opus", "messages": []}
-        apply_thinking_params(body, {"type": "adaptive"})
+        apply_thinking_params(body, ThinkingConfig(type="adaptive"))
         assert "thinking" not in body

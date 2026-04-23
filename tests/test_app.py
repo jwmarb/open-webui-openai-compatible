@@ -1,5 +1,7 @@
-import httpx
 from unittest.mock import patch
+
+import httpx
+from fastapi.testclient import TestClient
 
 from src.main import app
 
@@ -8,7 +10,7 @@ class MockWebClient:
     # Matches spec of src.client.WebClient so patch("src.main.WebClient") replaces it transparently.
     # Real async methods (not AsyncMock) so lifespan's await aclose() works.
 
-    def __init__(self, get_models=None, post_chat_completion=None):
+    def __init__(self, *_args, get_models=None, post_chat_completion=None, **_kwargs):
         self._get_models = get_models
         self._post_chat_completion = post_chat_completion
 
@@ -31,7 +33,6 @@ class TestHealth:
     def test_health(self):
         mock = _make_mock_webclient()
         with patch("src.main.WebClient", return_value=mock):
-            from fastapi.testclient import TestClient
             with TestClient(app) as tc:
                 response = tc.get("/health")
                 assert response.status_code == 200
@@ -53,7 +54,6 @@ class TestModelsEndpoint:
         mock = _make_mock_webclient(get_models=fake_get)
 
         with patch("src.main.WebClient", return_value=mock):
-            from fastapi.testclient import TestClient
             with TestClient(app) as tc:
                 response = tc.get("/v1/models")
                 assert response.status_code == 200
@@ -72,7 +72,6 @@ class TestModelsEndpoint:
         mock = _make_mock_webclient(get_models=fake_get_raises)
 
         with patch("src.main.WebClient", return_value=mock):
-            from fastapi.testclient import TestClient
             with TestClient(app) as tc:
                 response = tc.get("/v1/models")
                 assert response.status_code == 502
@@ -87,7 +86,6 @@ class TestModelsEndpoint:
         mock = _make_mock_webclient(get_models=fake_get_raises)
 
         with patch("src.main.WebClient", return_value=mock):
-            from fastapi.testclient import TestClient
             with TestClient(app) as tc:
                 response = tc.get("/v1/models")
                 assert response.status_code == 502
@@ -113,7 +111,6 @@ class TestChatCompletionsEndpoint:
         mock = _make_mock_webclient(post_chat_completion=fake_post)
 
         with patch("src.main.WebClient", return_value=mock):
-            from fastapi.testclient import TestClient
             with TestClient(app) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
@@ -133,7 +130,6 @@ class TestChatCompletionsEndpoint:
         mock = _make_mock_webclient(post_chat_completion=fake_post_raises)
 
         with patch("src.main.WebClient", return_value=mock):
-            from fastapi.testclient import TestClient
             with TestClient(app) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
@@ -146,7 +142,6 @@ class TestChatCompletionsEndpoint:
                 assert body["error"]["code"] == 503
 
     def test_chat_streaming_upstream_error(self):
-        """Upstream 400 before any data returns a proper HTTP error response."""
         http400 = httpx.Response(400, request=httpx.Request("POST", "/"))
 
         async def fake_post_stream(body, stream=False):
@@ -156,14 +151,13 @@ class TestChatCompletionsEndpoint:
                     request=httpx.Request("POST", "/"),
                     response=http400,
                 )
-                yield  # noqa: unreachable — makes this an async generator
+                yield  # noqa: F841 — makes this an async generator
 
             return failing_generator()
 
         mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
 
         with patch("src.main.WebClient", return_value=mock):
-            from fastapi.testclient import TestClient
             with TestClient(app) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
@@ -179,19 +173,16 @@ class TestChatCompletionsEndpoint:
                 assert body["error"]["code"] == 400
 
     def test_chat_streaming_timeout_error(self):
-        """Upstream timeout before any data returns HTTP 504."""
-
         async def fake_post_stream(body, stream=False):
             async def failing_generator():
                 raise httpx.ReadTimeout("timed out")
-                yield  # noqa: unreachable
+                yield  # noqa: F841
 
             return failing_generator()
 
         mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
 
         with patch("src.main.WebClient", return_value=mock):
-            from fastapi.testclient import TestClient
             with TestClient(app) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
@@ -207,19 +198,16 @@ class TestChatCompletionsEndpoint:
                 assert body["error"]["code"] == 504
 
     def test_chat_streaming_connection_error(self):
-        """Upstream connection error before any data returns HTTP 502."""
-
         async def fake_post_stream(body, stream=False):
             async def failing_generator():
                 raise httpx.RemoteProtocolError("connection reset")
-                yield  # noqa: unreachable
+                yield  # noqa: F841
 
             return failing_generator()
 
         mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
 
         with patch("src.main.WebClient", return_value=mock):
-            from fastapi.testclient import TestClient
             with TestClient(app) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
@@ -235,19 +223,16 @@ class TestChatCompletionsEndpoint:
                 assert body["error"]["code"] == 502
 
     def test_chat_streaming_generic_error(self):
-        """Generic exception before any data returns HTTP 502."""
-
         async def fake_post_stream(body, stream=False):
             async def failing_generator():
                 raise RuntimeError("connection reset")
-                yield  # noqa: unreachable
+                yield  # noqa: F841
 
             return failing_generator()
 
         mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
 
         with patch("src.main.WebClient", return_value=mock):
-            from fastapi.testclient import TestClient
             with TestClient(app) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
@@ -263,7 +248,6 @@ class TestChatCompletionsEndpoint:
                 assert body["error"]["code"] == 502
 
     def test_chat_streaming_mid_stream_error(self):
-        """Error after successful chunks emits SSE error event."""
         import json
         http500 = httpx.Response(500, request=httpx.Request("POST", "/"))
 
@@ -282,7 +266,6 @@ class TestChatCompletionsEndpoint:
         mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
 
         with patch("src.main.WebClient", return_value=mock):
-            from fastapi.testclient import TestClient
             with TestClient(app) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
@@ -302,7 +285,6 @@ class TestChatCompletionsEndpoint:
                 assert lines[3] == "data: [DONE]"
 
     def test_chat_streaming_mid_stream_timeout(self):
-        """Timeout after successful chunks emits SSE error event with timeout type."""
         import json
 
         async def fake_post_stream(body, stream=False):
@@ -315,7 +297,6 @@ class TestChatCompletionsEndpoint:
         mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
 
         with patch("src.main.WebClient", return_value=mock):
-            from fastapi.testclient import TestClient
             with TestClient(app) as tc:
                 response = tc.post(
                     "/v1/chat/completions",

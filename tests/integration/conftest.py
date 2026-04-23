@@ -3,13 +3,13 @@ from fastapi.testclient import TestClient
 
 from src.main import app
 from src.settings import settings
+from tests.conftest import TEST_DEFAULT_TOKEN, TEST_DEFAULT_URL
 
 
 def _is_real_instance() -> bool:
-    """Check if settings point to a real Open WebUI instance (not test defaults)."""
     return (
-        settings.open_webui_url != "https://test.example.com"
-        and settings.user_token != "test-token-123"
+        settings.open_webui_url != TEST_DEFAULT_URL
+        and settings.user_token != TEST_DEFAULT_TOKEN
     )
 
 
@@ -21,6 +21,5 @@ skip_without_real_instance = pytest.mark.skipif(
 
 @pytest.fixture
 def client():
-    """TestClient that talks to the real FastAPI app (which talks to real upstream)."""
     with TestClient(app) as tc:
         yield tc
