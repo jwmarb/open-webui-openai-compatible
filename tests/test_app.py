@@ -144,3 +144,72 @@ class TestChatCompletionsEndpoint:
                 assert "error" in body
                 assert body["error"]["type"] == "api_error"
                 assert body["error"]["code"] == 503
+
+    def test_chat_streaming_upstream_error(self):
+        """Upstream 400 during streaming emits SSE error event instead of crashing."""
+        import json
+        http400 = httpx.Response(400, request=httpx.Request("POST", "/"))
+
+        async def fake_post_stream(body, stream=False):
+            async def failing_generator():
+                raise httpx.HTTPStatusError(
+                    "Bad Request",
+                    request=httpx.Request("POST", "/"),
+                    response=http400,
+                )
+                yield  # noqa: unreachable — makes this an async generator
+
+            return failing_generator()
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
+
+        with patch("src.main.WebClient", return_value=mock):
+            from fastapi.testclient import TestClient
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "llama-3.1",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "stream": True,
+                    },
+                )
+                assert response.status_code == 200  # headers already sent
+                lines = [l for l in response.text.strip().split("\n") if l.startswith("data: ")]
+                assert len(lines) == 2
+                error_payload = json.loads(lines[0].removeprefix("data: "))
+                assert error_payload["error"]["type"] == "api_error"
+                assert error_payload["error"]["code"] == 400
+                assert lines[1] == "data: [DONE]"
+
+    def test_chat_streaming_generic_error(self):
+        """Generic exception during streaming emits SSE error event."""
+        import json
+
+        async def fake_post_stream(body, stream=False):
+            async def failing_generator():
+                raise RuntimeError("connection reset")
+                yield  # noqa: unreachable
+
+            return failing_generator()
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
+
+        with patch("src.main.WebClient", return_value=mock):
+            from fastapi.testclient import TestClient
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "llama-3.1",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "stream": True,
+                    },
+                )
+                assert response.status_code == 200
+                lines = [l for l in response.text.strip().split("\n") if l.startswith("data: ")]
+                assert len(lines) == 2
+                error_payload = json.loads(lines[0].removeprefix("data: "))
+                assert error_payload["error"]["type"] == "server_error"
+                assert error_payload["error"]["code"] == 502
+                assert lines[1] == "data: [DONE]"
