@@ -9,6 +9,9 @@ conda activate open-webui-openai-compatible
 # Lint
 ruff check src/ tests/
 
+# Type check
+pyright src/
+
 # Unit tests (no credentials needed)
 python -m pytest tests/test_translator.py tests/test_app.py -v
 
@@ -27,10 +30,10 @@ Single-package FastAPI proxy. Source lives in `src/`, no sub-packages.
 | Module | Role |
 |--------|------|
 | `src/settings.py` | Pydantic Settings singleton — **instantiated at import time** |
-| `src/client.py` | Async httpx wrapper; talks to Open WebUI `/api/models` and `/api/chat/completions` |
+| `src/client.py` | Async httpx wrapper; accepts `base_url` and `token` via constructor (dependency injection) |
 | `src/translator.py` | Model list translation, request body sanitization, Claude thinking variant logic |
 | `src/main.py` | FastAPI app with 3 routes: `/health`, `/v1/models`, `/v1/chat/completions` |
-| `src/models.py` | Pydantic response types (OpenAI schema shapes) — **currently unused** |
+| `src/models.py` | Pydantic response types (OpenAI schema shapes) — used by `translator.py` for validated serialization |
 
 ### Request flow
 
