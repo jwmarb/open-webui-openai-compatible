@@ -15,13 +15,17 @@ logger = logging.getLogger(__name__)
 __all__ = ["WebClient"]
 
 
+_DEFAULT_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+_STREAM_TIMEOUT = httpx.Timeout(None, connect=10.0, pool=120.0)
+
+
 class WebClient:
     """Async HTTP client wrapping Open WebUI's internal API endpoints."""
 
     def __init__(self, base_url: str, token: str) -> None:
         self._client = httpx.AsyncClient(
             base_url=base_url,
-            timeout=httpx.Timeout(120.0, connect=10.0),
+            timeout=_DEFAULT_TIMEOUT,
             headers={"Authorization": f"Bearer {token}"},
         )
 
@@ -64,7 +68,7 @@ class WebClient:
     async def _stream_chat_raw(self, body: dict[str, Any]) -> AsyncIterator[bytes]:
         """Yield raw byte chunks from upstream, preserving SSE framing exactly."""
         async with self._client.stream(
-            "POST", "/api/chat/completions", json=body,
+            "POST", "/api/chat/completions", json=body, timeout=_STREAM_TIMEOUT,
         ) as resp:
             if resp.is_error:
                 error_body = await resp.aread()
