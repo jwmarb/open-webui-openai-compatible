@@ -1,0 +1,59 @@
+digraph architecture {
+    rankdir=LR
+    bgcolor="transparent"
+    dpi=150
+
+    node [
+        shape=box
+        style="rounded,filled"
+        fontname="Helvetica"
+        fontsize=12
+        margin="0.3,0.15"
+    ]
+
+    edge [
+        fontname="Helvetica"
+        fontsize=10
+        color="#555555"
+    ]
+
+    client [
+        label=<<b>OpenAI Client</b><br/><font point-size="10">SDK / curl / LangChain</font>>
+        fillcolor="#E3F2FD"
+        color="#1565C0"
+    ]
+
+    proxy [
+        label=<<b>Proxy</b><br/><font point-size="10">FastAPI</font>>
+        fillcolor="#FFF3E0"
+        color="#E65100"
+    ]
+
+    openwebui [
+        label=<<b>Open WebUI</b><br/><font point-size="10">Upstream</font>>
+        fillcolor="#E8F5E9"
+        color="#2E7D32"
+    ]
+
+    client -> proxy [
+        label="  /v1/models\n  /v1/chat/completions"
+        fontcolor="#1565C0"
+    ]
+
+    proxy -> openwebui [
+        label="  /api/models\n  /api/chat/completions\n  + Bearer JWT"
+        fontcolor="#E65100"
+    ]
+
+    openwebui -> proxy [
+        label="  response"
+        style=dashed
+        fontcolor="#2E7D32"
+    ]
+
+    proxy -> client [
+        label="  translated\n  response"
+        style=dashed
+        fontcolor="#1565C0"
+    ]
+}

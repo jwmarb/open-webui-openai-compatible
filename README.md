@@ -20,14 +20,9 @@ Open WebUI provides its own `/v1/*` endpoints, but they require a **generated AP
 
 ## Architecture 🏗️
 
-```
-┌─────────────────┐         ┌──────────────┐         ┌──────────────┐
-│  OpenAI Client   │ ──────▶ │    Proxy     │ ──────▶ │  Open WebUI  │
-│  (SDK/curl/etc)  │ ◀────── │  (FastAPI)   │ ◀────── │              │
-└─────────────────┘         └──────────────┘         └──────────────┘
-     /v1/models                JWT from .env           /api/models
-     /v1/chat/completions                              /api/chat/completions
-```
+<div align="center">
+  <img src="./docs/architecture.svg" alt="Architecture diagram: OpenAI Client → Proxy (FastAPI) → Open WebUI">
+</div>
 
 Clients speak OpenAI's API format. The proxy translates those requests to Open WebUI's internal endpoints and handles JWT authentication transparently.
 
