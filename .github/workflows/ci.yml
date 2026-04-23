@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check src/ tests/
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[dev]"
+      - run: python -m pytest tests/test_translator.py tests/test_app.py -v
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    # Only run when secrets are available (skipped on fork PRs)
+    if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+    needs: [lint, unit-tests]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[dev]"
+      - name: Run integration tests
+        env:
+          OPEN_WEBUI_URL: ${{ secrets.OPEN_WEBUI_URL }}
+          USER_TOKEN: ${{ secrets.USER_TOKEN }}
+        run: |
+          if [ -z "$OPEN_WEBUI_URL" ] || [ -z "$USER_TOKEN" ]; then
+            echo "::notice::Secrets not configured — skipping integration tests"
+            exit 0
+          fi
+          python -m pytest tests/integration/ -v
