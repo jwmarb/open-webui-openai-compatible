@@ -146,8 +146,7 @@ class TestChatCompletionsEndpoint:
                 assert body["error"]["code"] == 503
 
     def test_chat_streaming_upstream_error(self):
-        """Upstream 400 during streaming emits SSE error event instead of crashing."""
-        import json
+        """Upstream 400 before any data returns a proper HTTP error response."""
         http400 = httpx.Response(400, request=httpx.Request("POST", "/"))
 
         async def fake_post_stream(body, stream=False):
@@ -174,17 +173,13 @@ class TestChatCompletionsEndpoint:
                         "stream": True,
                     },
                 )
-                assert response.status_code == 200  # headers already sent
-                lines = [l for l in response.text.strip().split("\n") if l.startswith("data: ")]
-                assert len(lines) == 2
-                error_payload = json.loads(lines[0].removeprefix("data: "))
-                assert error_payload["error"]["type"] == "api_error"
-                assert error_payload["error"]["code"] == 400
-                assert lines[1] == "data: [DONE]"
+                assert response.status_code == 400
+                body = response.json()
+                assert body["error"]["type"] == "api_error"
+                assert body["error"]["code"] == 400
 
     def test_chat_streaming_generic_error(self):
-        """Generic exception during streaming emits SSE error event."""
-        import json
+        """Generic exception before any data returns HTTP 502."""
 
         async def fake_post_stream(body, stream=False):
             async def failing_generator():
@@ -206,10 +201,46 @@ class TestChatCompletionsEndpoint:
                         "stream": True,
                     },
                 )
+                assert response.status_code == 502
+                body = response.json()
+                assert body["error"]["type"] == "server_error"
+                assert body["error"]["code"] == 502
+
+    def test_chat_streaming_mid_stream_error(self):
+        """Error after successful chunks emits SSE error event."""
+        import json
+        http500 = httpx.Response(500, request=httpx.Request("POST", "/"))
+
+        async def fake_post_stream(body, stream=False):
+            async def partial_then_fail():
+                yield "data: {\"chunk\": 1}"
+                yield "data: {\"chunk\": 2}"
+                raise httpx.HTTPStatusError(
+                    "Internal Server Error",
+                    request=httpx.Request("POST", "/"),
+                    response=http500,
+                )
+
+            return partial_then_fail()
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
+
+        with patch("src.main.WebClient", return_value=mock):
+            from fastapi.testclient import TestClient
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "llama-3.1",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "stream": True,
+                    },
+                )
                 assert response.status_code == 200
                 lines = [l for l in response.text.strip().split("\n") if l.startswith("data: ")]
-                assert len(lines) == 2
-                error_payload = json.loads(lines[0].removeprefix("data: "))
-                assert error_payload["error"]["type"] == "server_error"
-                assert error_payload["error"]["code"] == 502
-                assert lines[1] == "data: [DONE]"
+                assert lines[0] == "data: {\"chunk\": 1}"
+                assert lines[1] == "data: {\"chunk\": 2}"
+                error_payload = json.loads(lines[2].removeprefix("data: "))
+                assert error_payload["error"]["type"] == "api_error"
+                assert error_payload["error"]["code"] == 500
+                assert lines[3] == "data: [DONE]"

@@ -51,7 +51,26 @@ async def chat_completions(request: Request):
             body, stream=True
         )
 
+        # Advance to the first yielded line so that errors raised before
+        # any data (e.g. upstream 400 on raise_for_status) surface here
+        # where we can still return a proper HTTP error response.
+        first_line: str | None = None
+        try:
+            first_line = await anext(stream_gen.__aiter__(), None)
+        except httpx.HTTPStatusError as exc:
+            err = create_openai_error(
+                "Upstream request failed", "api_error", exc.response.status_code,
+            )
+            return JSONResponse(content=err, status_code=exc.response.status_code)
+        except Exception:
+            err = create_openai_error(
+                "Upstream service unavailable", "server_error", 502,
+            )
+            return JSONResponse(content=err, status_code=502)
+
         async def event_generator():
+            if first_line is not None:
+                yield first_line + "\n"
             try:
                 async for line in stream_gen:
                     yield line + "\n"
