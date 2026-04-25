@@ -15,19 +15,16 @@ logger = logging.getLogger(__name__)
 __all__ = ["WebClient"]
 
 
-_DEFAULT_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
-_STREAM_TIMEOUT = httpx.Timeout(None, connect=10.0, pool=120.0)
-
-
 class WebClient:
     """Async HTTP client wrapping Open WebUI's internal API endpoints."""
 
-    def __init__(self, base_url: str, token: str) -> None:
+    def __init__(self, base_url: str, token: str, *, request_timeout: int = 300) -> None:
         self._client = httpx.AsyncClient(
             base_url=base_url,
-            timeout=_DEFAULT_TIMEOUT,
+            timeout=httpx.Timeout(float(request_timeout), connect=10.0),
             headers={"Authorization": f"Bearer {token}"},
         )
+        self._stream_timeout = httpx.Timeout(None, connect=10.0, pool=float(request_timeout))
 
     async def get_models(self) -> dict[str, Any]:
         """GET /api/models — fetch available models from Open WebUI."""
@@ -63,12 +60,16 @@ class WebClient:
                 resp.text[:_MAX_ERROR_LOG_CHARS],
             )
         resp.raise_for_status()
-        return resp.json()
+        result = resp.json()
+        if result is None:
+            logger.error("Upstream returned null body (HTTP %s)", resp.status_code)
+            raise ValueError("Upstream returned empty or null response body")
+        return result
 
     async def _stream_chat_raw(self, body: dict[str, Any]) -> AsyncIterator[bytes]:
         """Yield raw byte chunks from upstream, preserving SSE framing exactly."""
         async with self._client.stream(
-            "POST", "/api/chat/completions", json=body, timeout=_STREAM_TIMEOUT,
+            "POST", "/api/chat/completions", json=body, timeout=self._stream_timeout,
         ) as resp:
             if resp.is_error:
                 error_body = await resp.aread()

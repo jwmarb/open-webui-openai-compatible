@@ -63,7 +63,9 @@ __all__ = ["app"]
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    app.state.web_client = WebClient(settings.open_webui_url, settings.user_token)
+    app.state.web_client = WebClient(
+        settings.open_webui_url, settings.user_token, request_timeout=settings.request_timeout,
+    )
     yield
     await app.state.web_client.aclose()
 
@@ -201,6 +203,20 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
     except httpx.HTTPStatusError as exc:
         err = create_openai_error("Upstream request failed", "api_error", exc.response.status_code)
         return JSONResponse(content=err, status_code=exc.response.status_code)
+    except (httpx.ReadTimeout, httpx.ConnectTimeout) as exc:
+        logger.error("Upstream timeout (non-streaming): %s", exc)
+        err = create_openai_error("Upstream request timed out", "timeout_error", 504)
+        return JSONResponse(content=err, status_code=504)
+    except (httpx.RemoteProtocolError, httpx.ReadError) as exc:
+        logger.error("Upstream connection error (non-streaming): %s", exc)
+        err = create_openai_error("Upstream connection failed", "api_error", 502)
+        return JSONResponse(content=err, status_code=502)
+    except ValueError as exc:
+        logger.error("Upstream empty response (non-streaming): %s", exc)
+        err = create_openai_error(
+            "Upstream returned empty response body", "server_error", 502,
+        )
+        return JSONResponse(content=err, status_code=502)
     except Exception:
         err = create_openai_error("Upstream service unavailable", "server_error", 502)
         return JSONResponse(content=err, status_code=502)
