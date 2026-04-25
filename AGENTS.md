@@ -9,7 +9,7 @@ conda activate open-webui-openai-compatible
 # Lint
 ruff check src/ tests/
 
-# Type check (1 pre-existing error on Settings() — see note below)
+# Type check
 pyright src/
 
 # Unit tests (no credentials needed)
@@ -75,7 +75,7 @@ The variant suffix is stripped before forwarding to upstream. The `thinking` par
 - If `OPEN_WEBUI_URL` or `USER_TOKEN` are missing, the import crashes with `ValidationError`.
 - Tests handle this via `os.environ.setdefault()` at the top of `tests/conftest.py` — this runs before any `src` import during collection.
 - The root conftest also has an `autouse` fixture that monkeypatches env vars for each test.
-- **Pyright reports 1 error** on `Settings()` (`reportCallIssue` — missing required args) because it cannot see pydantic-settings' env-var injection. This is a known pre-existing error; do not try to "fix" it.
+- The `Settings()` call has a `# type: ignore[call-arg]` comment because Pyright cannot see pydantic-settings' env-var injection. This is expected — do not remove the suppression.
 
 **When adding new test files**: always ensure `tests/conftest.py` is loaded first (pytest does this automatically for files under `tests/`). Never import from `src` at the module level of a test file without the conftest guard.
 

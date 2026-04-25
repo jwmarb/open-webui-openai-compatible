@@ -19,4 +19,4 @@ class Settings(BaseSettings):
         return value.rstrip("/")
 
 
-settings = Settings()
+settings = Settings()  # type: ignore[call-arg]  # pydantic-settings injects from env
