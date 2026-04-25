@@ -9,7 +9,7 @@ conda activate open-webui-openai-compatible
 # Lint
 ruff check src/ tests/
 
-# Type check
+# Type check (1 pre-existing error on Settings() — see note below)
 pyright src/
 
 # Unit tests (no credentials needed)
@@ -34,6 +34,7 @@ Single-package FastAPI proxy. Source lives in `src/`, no sub-packages.
 | `src/translator.py` | Model list translation, request body sanitization, Claude thinking variant logic |
 | `src/main.py` | FastAPI app with 3 routes: `/health`, `/v1/models`, `/v1/chat/completions` |
 | `src/models.py` | Pydantic response types (OpenAI schema shapes) — used by `translator.py` for validated serialization |
+| `tui.py` | Standalone Textual TUI chat client — talks to the **proxy**, not upstream directly. Not part of the `src` package. |
 
 ### Request flow
 
@@ -46,7 +47,7 @@ Single-package FastAPI proxy. Source lives in `src/`, no sub-packages.
 
 ### Streaming error handling
 
-Streaming uses raw byte passthrough via `httpx.Response.aiter_raw()` to preserve upstream SSE framing exactly, avoiding line-by-line re-parsing overhead. The proxy uses a first-chunk pre-read pattern: it advances the upstream async generator by one iteration *before* returning `StreamingResponse`. If the upstream rejects immediately (e.g. 400), the proxy returns a proper HTTP error JSON response.
+Streaming uses raw byte passthrough via `httpx.Response.aiter_bytes()` to preserve upstream SSE framing exactly, avoiding line-by-line re-parsing overhead. The proxy uses a first-chunk pre-read pattern: it advances the upstream async generator by one iteration *before* returning `StreamingResponse`. If the upstream rejects immediately (e.g. 400), the proxy returns a proper HTTP error JSON response.
 
 Error handling distinguishes specific failure modes:
 - `httpx.HTTPStatusError` → upstream HTTP error (preserves status code)
@@ -74,6 +75,7 @@ The variant suffix is stripped before forwarding to upstream. The `thinking` par
 - If `OPEN_WEBUI_URL` or `USER_TOKEN` are missing, the import crashes with `ValidationError`.
 - Tests handle this via `os.environ.setdefault()` at the top of `tests/conftest.py` — this runs before any `src` import during collection.
 - The root conftest also has an `autouse` fixture that monkeypatches env vars for each test.
+- **Pyright reports 1 error** on `Settings()` (`reportCallIssue` — missing required args) because it cannot see pydantic-settings' env-var injection. This is a known pre-existing error; do not try to "fix" it.
 
 **When adding new test files**: always ensure `tests/conftest.py` is loaded first (pytest does this automatically for files under `tests/`). Never import from `src` at the module level of a test file without the conftest guard.
 
