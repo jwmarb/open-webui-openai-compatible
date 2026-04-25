@@ -1,5 +1,7 @@
 from src.models import OpenAIModel, ThinkingConfig
 from src.translator import (
+    ADAPTIVE_THINKING_CONFIG,
+    EXTENDED_THINKING_CONFIG,
     apply_thinking_params,
     create_openai_error,
     generate_thinking_variants,
@@ -168,6 +170,10 @@ class TestSanitizeChatBody:
         }
         assert sanitize_chat_body(body) == body
 
+    def test_strips_all_non_openai_fields(self):
+        body = {"extra_body": {}, "api_base": "http://x", "custom_llm_provider": "openai", "litellm_call_id": "abc"}
+        assert sanitize_chat_body(body) == {}
+
 
 class TestGenerateThinkingVariants:
 
@@ -245,6 +251,16 @@ class TestResolveThinkingModel:
         assert base == "some-model:v2"
         assert config is None
 
+    def test_non_claude_extended_suffix_still_resolves(self):
+        base, config = resolve_thinking_model("gpt-4:extended")
+        assert base == "gpt-4"
+        assert config == EXTENDED_THINKING_CONFIG
+
+    def test_non_claude_adaptive_suffix_still_resolves(self):
+        base, config = resolve_thinking_model("gpt-4:adaptive")
+        assert base == "gpt-4"
+        assert config == ADAPTIVE_THINKING_CONFIG
+
 
 class TestApplyThinkingParams:
 
@@ -282,3 +298,14 @@ class TestApplyThinkingParams:
         body = {"model": "opus", "messages": []}
         apply_thinking_params(body, ThinkingConfig(type="adaptive"))
         assert "thinking" not in body
+
+    def test_uses_max_completion_tokens_when_max_tokens_absent(self):
+        body = {"model": "opus", "messages": [], "max_completion_tokens": 100}
+        result = apply_thinking_params(body, ThinkingConfig(type="enabled", budget_tokens=32000))
+        assert result["max_tokens"] == 64000
+        assert result["max_completion_tokens"] == 100
+
+    def test_max_tokens_zero_treated_as_unset(self):
+        body = {"model": "opus", "messages": [], "max_tokens": 0}
+        result = apply_thinking_params(body, ThinkingConfig(type="enabled", budget_tokens=32000))
+        assert result["max_tokens"] == 64000

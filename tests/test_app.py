@@ -1,9 +1,10 @@
+import json
 from unittest.mock import patch
 
 import httpx
 from fastapi.testclient import TestClient
 
-from src.main import app
+from src.main import _extract_finish_reason, app
 
 
 class MockWebClient:
@@ -197,38 +198,15 @@ class TestChatCompletionsEndpoint:
                 assert body["error"]["type"] == "timeout_error"
                 assert body["error"]["code"] == 504
 
-    def test_chat_streaming_connection_error(self):
+    # --- Mid-stream error paths (headers already sent → 200, error in SSE) ---
+
+    def test_chat_streaming_mid_stream_connection_error(self):
         async def fake_post_stream(body, stream=False):
-            async def failing_generator():
+            async def partial_then_disconnect():
+                yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
                 raise httpx.RemoteProtocolError("connection reset")
-                yield  # noqa: F841
 
-            return failing_generator()
-
-        mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
-
-        with patch("src.main.WebClient", return_value=mock):
-            with TestClient(app) as tc:
-                response = tc.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": "llama-3.1",
-                        "messages": [{"role": "user", "content": "Hi"}],
-                        "stream": True,
-                    },
-                )
-                assert response.status_code == 502
-                body = response.json()
-                assert body["error"]["type"] == "api_error"
-                assert body["error"]["code"] == 502
-
-    def test_chat_streaming_generic_error(self):
-        async def fake_post_stream(body, stream=False):
-            async def failing_generator():
-                raise RuntimeError("connection reset")
-                yield  # noqa: F841
-
-            return failing_generator()
+            return partial_then_disconnect()
 
         mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
 
@@ -236,30 +214,20 @@ class TestChatCompletionsEndpoint:
             with TestClient(app) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
-                    json={
-                        "model": "llama-3.1",
-                        "messages": [{"role": "user", "content": "Hi"}],
-                        "stream": True,
-                    },
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
                 )
-                assert response.status_code == 502
-                body = response.json()
-                assert body["error"]["type"] == "server_error"
-                assert body["error"]["code"] == 502
+                assert response.status_code == 200
+                lines = [ln for ln in response.text.strip().split("\n") if ln.startswith("data: ")]
+                error_payload = json.loads(lines[1].removeprefix("data: "))
+                assert error_payload["error"]["type"] == "api_error"
+                assert error_payload["error"]["code"] == 502
+                assert lines[2] == "data: [DONE]"
 
-    def test_chat_streaming_mid_stream_error(self):
-        import json
-        http500 = httpx.Response(500, request=httpx.Request("POST", "/"))
-
+    def test_chat_streaming_mid_stream_generic_error(self):
         async def fake_post_stream(body, stream=False):
             async def partial_then_fail():
-                yield b'data: {"chunk": 1}\n\n'
-                yield b'data: {"chunk": 2}\n\n'
-                raise httpx.HTTPStatusError(
-                    "Internal Server Error",
-                    request=httpx.Request("POST", "/"),
-                    response=http500,
-                )
+                yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+                raise RuntimeError("unexpected")
 
             return partial_then_fail()
 
@@ -269,30 +237,74 @@ class TestChatCompletionsEndpoint:
             with TestClient(app) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
-                    json={
-                        "model": "llama-3.1",
-                        "messages": [{"role": "user", "content": "Hi"}],
-                        "stream": True,
-                    },
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
                 )
                 assert response.status_code == 200
-                lines = [line for line in response.text.strip().split("\n") if line.startswith("data: ")]
-                assert lines[0] == 'data: {"chunk": 1}'
-                assert lines[1] == 'data: {"chunk": 2}'
-                error_payload = json.loads(lines[2].removeprefix("data: "))
-                assert error_payload["error"]["type"] == "api_error"
-                assert error_payload["error"]["code"] == 500
-                assert lines[3] == "data: [DONE]"
+                lines = [ln for ln in response.text.strip().split("\n") if ln.startswith("data: ")]
+                error_payload = json.loads(lines[1].removeprefix("data: "))
+                assert error_payload["error"]["type"] == "server_error"
+                assert error_payload["error"]["code"] == 502
+                assert lines[2] == "data: [DONE]"
 
-    def test_chat_streaming_mid_stream_timeout(self):
-        import json
+    # --- Non-streaming error paths ---
 
+    def test_chat_non_streaming_connection_error(self):
+        async def fake_post(body, stream=False):
+            raise httpx.RemoteProtocolError("connection reset")
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
+                )
+                assert response.status_code == 502
+                body = response.json()
+                assert body["error"]["type"] == "api_error"
+                assert body["error"]["code"] == 502
+
+    def test_chat_non_streaming_generic_error(self):
+        async def fake_post(body, stream=False):
+            raise RuntimeError("unexpected")
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
+                )
+                assert response.status_code == 502
+                body = response.json()
+                assert body["error"]["type"] == "server_error"
+                assert body["error"]["code"] == 502
+
+    def test_chat_non_streaming_connect_timeout(self):
+        async def fake_post(body, stream=False):
+            raise httpx.ConnectTimeout("connect timed out")
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
+                )
+                assert response.status_code == 504
+                body = response.json()
+                assert body["error"]["type"] == "timeout_error"
+
+    def test_chat_streaming_connect_timeout(self):
         async def fake_post_stream(body, stream=False):
-            async def partial_then_timeout():
-                yield b'data: {"chunk": 1}\n\n'
-                raise httpx.ReadTimeout("timed out")
+            async def failing_gen():
+                raise httpx.ConnectTimeout("connect timed out")
+                yield  # noqa: F841
 
-            return partial_then_timeout()
+            return failing_gen()
 
         mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
 
@@ -300,16 +312,346 @@ class TestChatCompletionsEndpoint:
             with TestClient(app) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
+                )
+                assert response.status_code == 504
+                body = response.json()
+                assert body["error"]["type"] == "timeout_error"
+
+    # --- Thinking variant end-to-end ---
+
+    def test_chat_thinking_variant_extended_e2e(self):
+        captured = {}
+        mock_result = {
+            "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "opus",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        }
+
+        async def fake_post(body, stream=False):
+            captured.update(body)
+            return mock_result
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "bedrock-claude-4-6-opus:extended", "messages": [{"role": "user", "content": "Hi"}]},
+                )
+                assert response.status_code == 200
+                assert captured["model"] == "bedrock-claude-4-6-opus"
+                assert captured["thinking"]["type"] == "enabled"
+                assert captured["thinking"]["budget_tokens"] == 32000
+                assert captured["max_tokens"] >= 64000
+
+    def test_chat_thinking_variant_adaptive_e2e(self):
+        captured = {}
+        mock_result = {
+            "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "sonnet",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        }
+
+        async def fake_post(body, stream=False):
+            captured.update(body)
+            return mock_result
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
                     json={
-                        "model": "llama-3.1",
+                        "model": "bedrock-claude-4-5-sonnet:adaptive",
                         "messages": [{"role": "user", "content": "Hi"}],
-                        "stream": True,
                     },
                 )
                 assert response.status_code == 200
-                lines = [line for line in response.text.strip().split("\n") if line.startswith("data: ")]
-                assert lines[0] == 'data: {"chunk": 1}'
+                assert captured["model"] == "bedrock-claude-4-5-sonnet"
+                assert captured["thinking"]["type"] == "adaptive"
+                assert "budget_tokens" not in captured["thinking"]
+                assert captured["max_tokens"] >= 64000
+
+    # --- Request sanitization end-to-end ---
+
+    def test_chat_sanitizes_litellm_fields(self):
+        captured = {}
+        mock_result = {
+            "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "m",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        }
+
+        async def fake_post(body, stream=False):
+            captured.update(body)
+            return mock_result
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "m",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "extra_body": {},
+                        "api_base": "http://x",
+                        "custom_llm_provider": "openai",
+                    },
+                )
+                assert response.status_code == 200
+                assert "extra_body" not in captured
+                assert "api_base" not in captured
+                assert "custom_llm_provider" not in captured
+                assert captured["model"] == "m"
+
+    def test_chat_empty_body(self):
+        captured = {}
+        mock_result = {
+            "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "stop"}],
+        }
+
+        async def fake_post(body, stream=False):
+            captured.update(body)
+            return mock_result
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.post("/v1/chat/completions", json={})
+                assert response.status_code == 200
+                assert captured == {}
+
+
+class TestModelsThinkingVariants:
+
+    def test_models_with_claude_includes_thinking_variants(self):
+        mock_raw = {
+            "data": [
+                {"id": "bedrock-claude-4-6-opus", "owned_by": "Anthropic", "created": 1700000000},
+            ]
+        }
+
+        async def fake_get():
+            return mock_raw
+
+        mock = _make_mock_webclient(get_models=fake_get)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.get("/v1/models")
+                assert response.status_code == 200
+                ids = [m["id"] for m in response.json()["data"]]
+                assert ids == [
+                    "bedrock-claude-4-6-opus",
+                    "bedrock-claude-4-6-opus:extended",
+                    "bedrock-claude-4-6-opus:adaptive",
+                ]
+
+
+class TestErrorResponseShape:
+
+    def _assert_openai_error_shape(self, body: dict):
+        assert set(body.keys()) == {"error"}, f"Expected only 'error' key, got {set(body.keys())}"
+        err = body["error"]
+        assert isinstance(err["message"], str) and len(err["message"]) > 0
+        assert err["type"] in ("api_error", "server_error", "timeout_error", "invalid_request_error")
+        assert err["code"] is None or isinstance(err["code"], int)
+
+    def test_error_shape_http_status_errors(self):
+        for status_code in (400, 401, 403, 429, 500, 502, 503):
+            resp = httpx.Response(status_code, request=httpx.Request("POST", "/"))
+
+            async def make_raiser(sc=status_code, r=resp):
+                raise httpx.HTTPStatusError(f"Error {sc}", request=httpx.Request("POST", "/"), response=r)
+
+            mock = _make_mock_webclient(post_chat_completion=lambda body, stream=False, _r=make_raiser: _r())
+
+            with patch("src.main.WebClient", return_value=mock):
+                with TestClient(app) as tc:
+                    response = tc.post(
+                        "/v1/chat/completions",
+                        json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
+                    )
+                    assert response.status_code == status_code, f"Expected {status_code}, got {response.status_code}"
+                    self._assert_openai_error_shape(response.json())
+
+    def test_error_shape_timeout(self):
+        async def fake_post(body, stream=False):
+            raise httpx.ReadTimeout("timed out")
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
+                )
+                self._assert_openai_error_shape(response.json())
+
+    def test_error_shape_connection_error(self):
+        async def fake_post(body, stream=False):
+            raise httpx.RemoteProtocolError("reset")
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
+                )
+                self._assert_openai_error_shape(response.json())
+
+    def test_error_shape_null_response(self):
+        async def fake_post(body, stream=False):
+            raise ValueError("Upstream returned empty or null response body")
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
+                )
+                self._assert_openai_error_shape(response.json())
+
+    def test_error_shape_generic_error(self):
+        async def fake_post(body, stream=False):
+            raise RuntimeError("unexpected")
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
+                )
+                self._assert_openai_error_shape(response.json())
+
+    def test_error_shape_models_upstream_error(self):
+        http502 = httpx.Response(502, request=httpx.Request("GET", "/"))
+
+        async def fake_get():
+            raise httpx.HTTPStatusError("Bad Gateway", request=httpx.Request("GET", "/"), response=http502)
+
+        mock = _make_mock_webclient(get_models=fake_get)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.get("/v1/models")
+                self._assert_openai_error_shape(response.json())
+
+    def test_error_shape_models_generic_error(self):
+        async def fake_get():
+            raise RuntimeError("connection refused")
+
+        mock = _make_mock_webclient(get_models=fake_get)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.get("/v1/models")
+                self._assert_openai_error_shape(response.json())
+
+    def test_streaming_error_events_have_openai_shape(self):
+        async def fake_post_stream(body, stream=False):
+            async def gen():
+                yield b'data: {"choices":[{"delta":{"content":"x"}}]}\n\n'
+                raise httpx.ReadTimeout("timed out")
+
+            return gen()
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
+                )
+                lines = [ln for ln in response.text.strip().split("\n") if ln.startswith("data: ")]
                 error_payload = json.loads(lines[1].removeprefix("data: "))
-                assert error_payload["error"]["type"] == "timeout_error"
-                assert error_payload["error"]["code"] == 504
-                assert lines[2] == "data: [DONE]"
+                self._assert_openai_error_shape(error_payload)
+
+
+class TestExtractFinishReason:
+
+    def test_finish_reason_stop(self):
+        chunk = b'data: {"choices":[{"finish_reason":"stop"}]}\n\n'
+        assert _extract_finish_reason(chunk) == "stop"
+
+    def test_finish_reason_tool_calls(self):
+        chunk = b'data: {"choices":[{"finish_reason":"tool_calls"}]}\n\n'
+        assert _extract_finish_reason(chunk) == "tool_calls"
+
+    def test_finish_reason_null_returns_none(self):
+        chunk = b'data: {"choices":[{"finish_reason":null}]}\n\n'
+        assert _extract_finish_reason(chunk) is None
+
+    def test_finish_reason_null_with_space_returns_none(self):
+        chunk = b'data: {"choices":[{"finish_reason": null}]}\n\n'
+        assert _extract_finish_reason(chunk) is None
+
+    def test_finish_reason_absent_returns_none(self):
+        chunk = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+        assert _extract_finish_reason(chunk) is None
+
+    def test_finish_reason_done_marker_returns_none(self):
+        chunk = b'data: [DONE]\n\n'
+        assert _extract_finish_reason(chunk) is None
+
+    def test_finish_reason_malformed_json(self):
+        chunk = b'data: {malformed "finish_reason" json}\n\n'
+        assert _extract_finish_reason(chunk) is None
+
+    def test_finish_reason_no_needle_fast_path(self):
+        chunk = b'data: {"choices":[{"delta":{"content":"hello world"}}]}\n\n'
+        assert _extract_finish_reason(chunk) is None
+
+    def test_finish_reason_multiple_choices_all_null(self):
+        chunk = b'data: {"choices":[{"finish_reason":null},{"finish_reason":null}]}\n\n'
+        assert _extract_finish_reason(chunk) is None
+
+    def test_finish_reason_multiple_choices_non_null(self):
+        chunk = b'data: {"choices":[{"finish_reason":"stop"},{"finish_reason":"length"}]}\n\n'
+        assert _extract_finish_reason(chunk) == "stop"
+        async def fake_post_null(body, stream=False):
+            raise ValueError("Upstream returned empty or null response body")
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post_null)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "llama-3.1", "messages": [{"role": "user", "content": "Hi"}]},
+                )
+                assert response.status_code == 502
+                body = response.json()
+                assert "error" in body
+                assert body["error"]["type"] == "server_error"
+                assert body["error"]["code"] == 502
+                assert "empty response" in body["error"]["message"].lower()
+
+    def test_chat_non_streaming_timeout(self):
+        async def fake_post_timeout(body, stream=False):
+            raise httpx.ReadTimeout("timed out")
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post_timeout)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "llama-3.1", "messages": [{"role": "user", "content": "Hi"}]},
+                )
+                assert response.status_code == 504
+                body = response.json()
+                assert body["error"]["type"] == "timeout_error"
+                assert body["error"]["code"] == 504
