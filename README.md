@@ -111,6 +111,29 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 
 Replace `llama3` with a model name that exists in your Open WebUI instance. The streaming endpoint returns Server-Sent Events (`text/event-stream`).
 
+### Claude Thinking Variants 🧠
+
+For Claude models, the proxy auto-generates virtual thinking variants in the `/v1/models` list. These let you enable Claude's extended thinking without manually injecting `thinking` parameters:
+
+| Suffix | Effect | Example |
+|--------|--------|---------|
+| `:extended` | `thinking.type=enabled` with a token budget | `claude-sonnet-4-20250514:extended` |
+| `:adaptive` | `thinking.type=adaptive` (model decides when to think) | `claude-sonnet-4-20250514:adaptive` |
+
+Use the variant name as your `model` value — the proxy strips the suffix and injects the right parameters before forwarding upstream.
+
+```bash
+# Chat with extended thinking
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-4-20250514:extended","messages":[{"role":"user","content":"Explain the Riemann hypothesis"}],"stream":true}'
+```
+
+**Notes:**
+- `:extended` is available for all Claude models. Haiku gets a smaller budget (16k tokens vs 32k).
+- `:adaptive` is available for Sonnet and Opus but **not** Haiku.
+- The proxy automatically sets `max_tokens` high enough for thinking to work (64k standard, 32k for Haiku).
+
 ## Testing 🧪
 
 ### Unit Tests
@@ -146,6 +169,25 @@ python -m pytest tests/test_translator.py tests/test_app.py -v
 # Full suite (integration tests skip without real credentials)
 python -m pytest -v -rs
 ```
+
+## TUI Chat Client 💬
+
+A terminal-based chat interface built with [Textual](https://textual.textualize.io/). It connects to the proxy (not Open WebUI directly), so the proxy must be running first.
+
+```sh
+python tui.py
+```
+
+Set `PROXY_URL` in `.env` or as an environment variable to point at a non-default proxy address (default: `http://localhost:8000`).
+
+**Features:** model selection dropdown, streaming responses with live Markdown rendering, collapsible thinking blocks for Claude thinking variants, and chat history within the session.
+
+| Binding | Action |
+|---------|--------|
+| `Enter` | Send message |
+| `Shift+Enter` | Insert newline |
+| `Ctrl+N` | New chat (clear history) |
+| `Ctrl+Q` | Quit |
 
 ## Known Limitations ⚠️
 
