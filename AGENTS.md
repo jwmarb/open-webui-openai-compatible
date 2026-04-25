@@ -21,7 +21,47 @@ OPEN_WEBUI_URL=https://your-open-webui-instance.example.com USER_TOKEN=<jwt> pyt
 # Run server
 cp .env.example .env  # then edit with real values
 uvicorn src.main:app --port 8000
+
+# Docker
+docker compose up -d
 ```
+
+## Structure
+
+```
+open-webui-openai-compatible/
+├── src/                  # All proxy source (flat, no sub-packages)
+│   ├── settings.py       # Pydantic Settings singleton — instantiated at import time
+│   ├── client.py         # Async httpx wrapper (DI via constructor)
+│   ├── translator.py     # Model translation, body sanitization, thinking variants
+│   ├── models.py         # Pydantic response types (OpenAI schema shapes)
+│   └── main.py           # FastAPI app — 3 routes only
+├── tests/
+│   ├── conftest.py       # Module-level env defaults + autouse monkeypatch
+│   ├── test_translator.py
+│   ├── test_app.py       # MockWebClient + patch("src.main.WebClient")
+│   └── integration/
+│       ├── conftest.py   # skip_without_real_instance marker + TestClient fixture
+│       ├── test_e2e.py
+│       └── test_openai_sdk.py
+├── tui.py                # Standalone Textual TUI client (NOT part of src/)
+├── docs/                 # Architecture diagrams (dot/svg/png)
+└── .github/workflows/ci.yml
+```
+
+## Where to look
+
+| Task | Location | Notes |
+|------|----------|-------|
+| Add/modify routes | `src/main.py` | Only 3 routes exist — no middleware |
+| Allow new chat param | `OPENAI_CHAT_PARAMS` in `src/translator.py` | Whitelist; `thinking` bypasses it |
+| Change thinking budget | Constants at top of `src/translator.py` | `EXTENDED_THINKING_CONFIG`, `MIN_MAX_TOKENS_*` |
+| Add response model | `src/models.py` | Pydantic types matching OpenAI schema |
+| Change upstream URLs | `src/client.py` | `/api/models`, `/api/chat/completions` |
+| Change env vars | `src/settings.py` | Then update `tests/conftest.py` defaults |
+| Add unit test | `tests/test_app.py` | Use `MockWebClient` pattern, not `AsyncMock` |
+| Add integration test | `tests/integration/` | Needs real creds; uses `skip_without_real_instance` |
+| TUI changes | `tui.py` (root) | Talks to proxy, not upstream |
 
 ## Architecture
 
@@ -35,6 +75,28 @@ Single-package FastAPI proxy. Source lives in `src/`, no sub-packages.
 | `src/main.py` | FastAPI app with 3 routes: `/health`, `/v1/models`, `/v1/chat/completions` |
 | `src/models.py` | Pydantic response types (OpenAI schema shapes) — used by `translator.py` for validated serialization |
 | `tui.py` | Standalone Textual TUI chat client — talks to the **proxy**, not upstream directly. Not part of the `src` package. |
+
+### Code map
+
+| Symbol | Type | Location | Role |
+|--------|------|----------|------|
+| `Settings` | Class | `settings.py:9` | Pydantic Settings with `open_webui_url`, `user_token`, `port` |
+| `settings` | Singleton | `settings.py:22` | Module-level instance — import triggers validation |
+| `WebClient` | Class | `client.py:22` | httpx wrapper: `get_models()`, `post_chat_completion()`, `_stream_chat_raw()` |
+| `app` | FastAPI | `main.py:71` | App instance with lifespan (creates/closes `WebClient`) |
+| `health` | Route | `main.py:74` | `GET /health` |
+| `models` | Route | `main.py:79` | `GET /v1/models` → upstream `GET /api/models` |
+| `chat_completions` | Route | `main.py:93` | `POST /v1/chat/completions` → upstream `POST /api/chat/completions` |
+| `translate_models_response` | Func | `translator.py:131` | Raw upstream → OpenAI `ModelList` |
+| `sanitize_chat_body` | Func | `translator.py:147` | Strip non-OpenAI fields via `OPENAI_CHAT_PARAMS` whitelist |
+| `resolve_thinking_model` | Func | `translator.py:101` | Strip `:extended`/`:adaptive` suffix, return thinking config |
+| `apply_thinking_params` | Func | `translator.py:115` | Inject `thinking` param + ensure sufficient `max_tokens` |
+| `generate_thinking_variants` | Func | `translator.py:79` | Create virtual `:extended`/`:adaptive` model entries |
+| `create_openai_error` | Func | `translator.py:151` | Build OpenAI-format error JSON |
+| `OpenAIModel` / `OpenAIModelList` | Pydantic | `models.py:10,19` | Model list response types |
+| `ThinkingConfig` | Pydantic | `models.py:26` | `type` + `budget_tokens` |
+| `ChatCompletionResponse` | Pydantic | `models.py:50` | Full chat completion shape |
+| `OpenAIErrorResponse` | Pydantic | `models.py:69` | `{"error": {"message", "type", "code"}}` |
 
 ### Request flow
 
@@ -81,10 +143,18 @@ The variant suffix is stripped before forwarding to upstream. The `thinking` par
 
 ## Testing
 
-- **Unit tests** (`tests/test_translator.py`, `tests/test_app.py`): Mock the `WebClient` via `unittest.mock.patch("src.main.WebClient")`. No network calls.
+- **Unit tests** (`tests/test_translator.py`, `tests/test_app.py`): Mock the `WebClient` via `unittest.mock.patch("src.main.WebClient")`. Use the custom `MockWebClient` class (not `AsyncMock`) — it has real async methods so `lifespan` can call `await aclose()`.
 - **Integration tests** (`tests/integration/`): Use real credentials. Skip automatically when env vars are test defaults. The skip guard reads from the already-instantiated `settings` singleton, not raw env vars.
 - **OpenAI SDK tests** (`tests/integration/test_openai_sdk.py`): Wire the OpenAI client through `TestClient` via `http_client=client` with `base_url="http://testserver/v1"`. Covers models, streaming, tool calls, and thinking variants.
 - Integration tests need real env vars **exported before pytest starts** (not just in `.env`) because `os.environ.setdefault` in the root conftest won't overwrite pre-existing vars.
+
+## Conventions
+
+- **Python 3.12+**, `ruff` for linting, `pyright` (standard mode) for type checking.
+- **Line length**: 120 chars.
+- **Ruff rules**: `E, F, W, I, UP` only. No docstring or naming convention enforcement.
+- **Env management**: conda (`conda activate open-webui-openai-compatible`).
+- **All config in `pyproject.toml`** — no standalone ruff.toml, pyrightconfig.json, etc.
 
 ## Request body sanitization
 
@@ -101,9 +171,20 @@ The proxy does **not** use Open WebUI's `/v1/*` paths (those require API keys, n
 | `GET /v1/models` | `GET /api/models` | Bearer JWT |
 | `POST /v1/chat/completions` | `POST /api/chat/completions` | Bearer JWT |
 
+## CI pipeline
+
+GitHub Actions (`.github/workflows/ci.yml`): 4 jobs, all on Python 3.12.
+
+1. **lint** — `ruff check src/ tests/`
+2. **typecheck** — `pyright src/` (with dummy env vars)
+3. **unit-tests** — `pytest tests/test_translator.py tests/test_app.py -v`
+4. **integration-tests** — runs after lint+typecheck+unit pass; skips on fork PRs or missing secrets
+
 ## Constraints
 
 - No hardcoded URLs anywhere in `src/` — all from `settings`.
 - Error responses must use OpenAI JSON format: `{"error": {"message", "type", "code"}}`.
 - Never expose `OPEN_WEBUI_URL` or `USER_TOKEN` values in error messages or logs.
 - Only 3 routes exist. No `/v1/models/{id}`, no embeddings, no CORS middleware.
+- Do not remove the `# type: ignore[call-arg]` on `Settings()` — Pyright can't see pydantic-settings env injection.
+- `tests/test_app.py` has `# noqa: F841` on async generator lines — intentional, do not remove.
