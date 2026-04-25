@@ -78,7 +78,7 @@ class WebClient:
                     error_body[:_MAX_ERROR_LOG_CHARS],
                 )
             resp.raise_for_status()
-            async for chunk in resp.aiter_raw():
+            async for chunk in resp.aiter_bytes():
                 yield chunk
 
     async def aclose(self) -> None:
