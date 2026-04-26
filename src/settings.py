@@ -13,6 +13,16 @@ class Settings(BaseSettings):
     user_token: str
     port: int = Field(default=8000, ge=1, le=65535)
     request_timeout: int = Field(default=300, ge=10, le=3600)
+    log_level: str = Field(default="INFO")
+
+    @field_validator("log_level")
+    @classmethod
+    def _normalize_log_level(cls, value: str) -> str:
+        v = value.upper()
+        if v not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            msg = f"Invalid LOG_LEVEL: {value!r}. Must be DEBUG, INFO, WARNING, ERROR, or CRITICAL."
+            raise ValueError(msg)
+        return v
 
     @field_validator("open_webui_url")
     @classmethod

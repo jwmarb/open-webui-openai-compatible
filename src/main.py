@@ -21,6 +21,15 @@ from .translator import (
     translate_models_response,
 )
 
+# Configure the "src" namespace logger so all src.* modules emit output.
+# Uses the "src" parent rather than root to avoid flooding with third-party noise.
+_pkg_logger = logging.getLogger("src")
+_pkg_logger.setLevel(getattr(logging, settings.log_level))
+if not _pkg_logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(name)s — %(message)s"))
+    _pkg_logger.addHandler(_handler)
+
 logger = logging.getLogger(__name__)
 
 _SSE_HEADERS: Final[dict[str, str]] = {
