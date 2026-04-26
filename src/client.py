@@ -28,7 +28,9 @@ class WebClient:
 
     async def get_models(self) -> dict[str, Any]:
         """GET /api/models — fetch available models from Open WebUI."""
+        logger.debug("GET /api/models → %s", self._client.base_url)
         resp = await self._client.get("/api/models")
+        logger.debug("GET /api/models ← HTTP %s (%d bytes)", resp.status_code, len(resp.content))
         resp.raise_for_status()
         return resp.json()
 
@@ -52,7 +54,13 @@ class WebClient:
         """
         if stream:
             return self._stream_chat_raw(body)
+        logger.debug("POST /api/chat/completions → model=%s", body.get("model", "?"))
         resp = await self._client.post("/api/chat/completions", json=body)
+        logger.debug(
+            "POST /api/chat/completions ← HTTP %s (%d bytes)",
+            resp.status_code,
+            len(resp.content),
+        )
         if resp.is_error:
             logger.error(
                 "Upstream %s: %s",
@@ -68,9 +76,11 @@ class WebClient:
 
     async def _stream_chat_raw(self, body: dict[str, Any]) -> AsyncIterator[bytes]:
         """Yield raw byte chunks from upstream, preserving SSE framing exactly."""
+        logger.debug("POST /api/chat/completions (stream) → model=%s", body.get("model", "?"))
         async with self._client.stream(
             "POST", "/api/chat/completions", json=body, timeout=self._stream_timeout,
         ) as resp:
+            logger.debug("POST /api/chat/completions (stream) ← HTTP %s", resp.status_code)
             if resp.is_error:
                 error_body = await resp.aread()
                 logger.error(

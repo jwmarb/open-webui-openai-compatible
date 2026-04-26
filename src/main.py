@@ -81,29 +81,43 @@ async def health() -> dict[str, str]:
 @app.get("/v1/models")
 async def models(request: Request) -> JSONResponse:
     try:
+        logger.debug("GET /v1/models — fetching upstream model list")
         raw = await request.app.state.web_client.get_models()
         translated = translate_models_response(raw)
+        logger.debug("GET /v1/models — returning %d models", len(translated.get("data", [])))
         return JSONResponse(content=translated)
     except httpx.HTTPStatusError as exc:
+        logger.error("GET /v1/models — upstream HTTP %s", exc.response.status_code)
         err = create_openai_error("Upstream request failed", "api_error", exc.response.status_code)
         return JSONResponse(content=err, status_code=exc.response.status_code)
     except Exception:
+        logger.exception("GET /v1/models — unexpected error")
         err = create_openai_error("Upstream service unavailable", "server_error", 502)
         return JSONResponse(content=err, status_code=502)
 
 
 @app.post("/v1/chat/completions", response_model=None)
 async def chat_completions(request: Request) -> JSONResponse | StreamingResponse:
-    body: dict[str, Any] = sanitize_chat_body(await request.json())
-    logger.debug("Incoming request body keys: %s", list(body.keys()))
+    raw_body = await request.json()
+    logger.info(
+        "POST /v1/chat/completions — model=%s stream=%s messages=%d",
+        raw_body.get("model", "?"),
+        raw_body.get("stream", False),
+        len(raw_body.get("messages", [])),
+    )
+    logger.debug("Raw request body keys: %s", list(raw_body.keys()))
+    body: dict[str, Any] = sanitize_chat_body(raw_body)
+    logger.debug("Sanitized body keys: %s", list(body.keys()))
 
     model = body.get("model", "")
     base_model, thinking_config = resolve_thinking_model(model)
     if thinking_config is not None:
+        logger.info("Thinking variant detected: %s → base=%s config=%s", model, base_model, thinking_config)
         body["model"] = base_model
         body = apply_thinking_params(body, thinking_config)
 
     is_stream = body.get("stream") is True
+    logger.debug("Forwarding to upstream: model=%s stream=%s", body.get("model"), is_stream)
 
     if is_stream:
         stream_gen = await request.app.state.web_client.post_chat_completion(
@@ -199,6 +213,11 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
 
     try:
         result = await request.app.state.web_client.post_chat_completion(body)
+        logger.info(
+            "Non-streaming response received: model=%s choices=%d",
+            result.get("model", "?"),
+            len(result.get("choices", [])),
+        )
         return JSONResponse(content=result)
     except httpx.HTTPStatusError as exc:
         err = create_openai_error("Upstream request failed", "api_error", exc.response.status_code)
