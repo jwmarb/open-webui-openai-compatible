@@ -246,6 +246,51 @@ class TestChatCompletionsEndpoint:
                 assert error_payload["error"]["code"] == 502
                 assert lines[2] == "data: [DONE]"
 
+    # --- finish_reason injection ---
+
+    def test_streaming_injects_finish_reason_when_upstream_omits_it(self):
+        async def fake_post_stream(body, stream=False):
+            async def gen_no_finish_reason():
+                yield b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
+                yield b'data: {"choices":[{"delta":{"content":" world"}}]}\n\n'
+
+            return gen_no_finish_reason()
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
+                )
+                assert response.status_code == 200
+                lines = [ln for ln in response.text.strip().split("\n") if ln.startswith("data: ")]
+                # Last data line should be the injected finish_reason
+                last_payload = json.loads(lines[-1].removeprefix("data: "))
+                assert last_payload["choices"][0]["finish_reason"] == "stop"
+
+    def test_streaming_does_not_inject_when_upstream_already_sends_finish_reason(self):
+        async def fake_post_stream(body, stream=False):
+            async def gen_with_finish_reason():
+                yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+                yield b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+
+            return gen_with_finish_reason()
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
+
+        with patch("src.main.WebClient", return_value=mock):
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
+                )
+                assert response.status_code == 200
+                lines = [ln for ln in response.text.strip().split("\n") if ln.startswith("data: ")]
+                # Should only have the 2 upstream chunks, no injected third chunk
+                assert len(lines) == 2
+
     # --- Non-streaming error paths ---
 
     def test_chat_non_streaming_connection_error(self):

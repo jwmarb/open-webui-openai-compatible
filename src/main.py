@@ -172,10 +172,20 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
                 async for chunk in stream_gen:
                     finish_reason = _extract_finish_reason(chunk) or finish_reason
                     yield chunk
-                logger.info(
-                    "Stream ended for model=%s finish_reason=%s",
-                    model, finish_reason,
-                )
+                if finish_reason is None:
+                    # Upstream didn't send a finish_reason (e.g. Bedrock/Claude
+                    # via Open WebUI). Inject one so OpenAI-compatible clients
+                    # get a proper completion signal.
+                    yield b'data: {"choices":[{"index":0,"finish_reason":"stop"}]}\n\n'
+                    logger.info(
+                        "Stream ended for model=%s — injected finish_reason=stop",
+                        model,
+                    )
+                else:
+                    logger.info(
+                        "Stream ended for model=%s finish_reason=%s",
+                        model, finish_reason,
+                    )
             except httpx.HTTPStatusError as exc:
                 err = create_openai_error(
                     "Upstream request failed", "api_error", exc.response.status_code,
