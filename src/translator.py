@@ -60,18 +60,22 @@ def generate_thinking_variants(model: OpenAIModel) -> list[OpenAIModel]:
 
     variants: list[OpenAIModel] = []
 
-    variants.append(OpenAIModel(
-        id=model.id + THINKING_SUFFIX_EXTENDED,
-        created=model.created,
-        owned_by=model.owned_by,
-    ))
-
-    if _supports_adaptive(model.id):
-        variants.append(OpenAIModel(
-            id=model.id + THINKING_SUFFIX_ADAPTIVE,
+    variants.append(
+        OpenAIModel(
+            id=model.id + THINKING_SUFFIX_EXTENDED,
             created=model.created,
             owned_by=model.owned_by,
-        ))
+        )
+    )
+
+    if _supports_adaptive(model.id):
+        variants.append(
+            OpenAIModel(
+                id=model.id + THINKING_SUFFIX_ADAPTIVE,
+                created=model.created,
+                owned_by=model.owned_by,
+            )
+        )
 
     return variants
 
@@ -180,8 +184,24 @@ def _ensure_stream_usage(body: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
+_UNSUPPORTED_FIELDS: frozenset[str] = frozenset(
+    {
+        "vector_store_ids",
+        "file_ids",
+    }
+)
+
+
+def _strip_unsupported_fields(body: dict[str, Any]) -> dict[str, Any]:
+    """Remove fields that upstream providers (e.g. Bedrock) reject as extra inputs."""
+    for field in _UNSUPPORTED_FIELDS:
+        body.pop(field, None)
+    return body
+
+
 def rewrite_chat_body(body: dict[str, Any]) -> dict[str, Any]:
     rewritten = {**body}
+    rewritten = _strip_unsupported_fields(rewritten)
     rewritten = _scrub_bedrock_tool_fields(rewritten)
     rewritten = _ensure_stream_usage(rewritten)
     return rewritten

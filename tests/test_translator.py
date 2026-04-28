@@ -13,7 +13,6 @@ from src.translator import (
 
 
 class TestTranslateModelsResponse:
-
     def test_translate_empty_response(self):
         raw = {"data": []}
         result = translate_models_response(raw)
@@ -79,7 +78,6 @@ class TestTranslateModelsResponse:
 
 
 class TestCreateOpenAIError:
-
     def test_create_openai_error_default(self):
         result = create_openai_error("Something went wrong")
         assert result == {
@@ -106,7 +104,6 @@ class TestCreateOpenAIError:
 
 
 class TestSanitizeChatBody:
-
     def test_keeps_standard_openai_fields(self):
         body = {
             "model": "gpt-4",
@@ -199,7 +196,6 @@ class TestSanitizeChatBody:
 
 
 class TestGenerateThinkingVariants:
-
     def test_non_claude_model_no_variants(self):
         model = OpenAIModel(id="gpt-4", owned_by="OpenAI")
         assert generate_thinking_variants(model) == []
@@ -231,10 +227,12 @@ class TestGenerateThinkingVariants:
             assert v.object == "model"
 
     def test_models_response_includes_variants(self):
-        raw = {"data": [
-            {"id": "bedrock-claude-4-5-haiku", "owned_by": ""},
-            {"id": "gpt-4", "owned_by": "OpenAI"},
-        ]}
+        raw = {
+            "data": [
+                {"id": "bedrock-claude-4-5-haiku", "owned_by": ""},
+                {"id": "gpt-4", "owned_by": "OpenAI"},
+            ]
+        }
         result = translate_models_response(raw)
         ids = [m["id"] for m in result["data"]]
         assert ids == [
@@ -245,7 +243,6 @@ class TestGenerateThinkingVariants:
 
 
 class TestResolveThinkingModel:
-
     def test_plain_model_no_thinking(self):
         base, config = resolve_thinking_model("bedrock-claude-4-6-opus")
         assert base == "bedrock-claude-4-6-opus"
@@ -286,7 +283,6 @@ class TestResolveThinkingModel:
 
 
 class TestApplyThinkingParams:
-
     def test_injects_thinking_config(self):
         body = {"model": "opus", "messages": []}
         result = apply_thinking_params(body, ThinkingConfig(type="enabled", budget_tokens=32000))
@@ -335,7 +331,6 @@ class TestApplyThinkingParams:
 
 
 class TestBedrockToolScrubbing:
-
     def test_empty_tools_list_removed(self):
         body = {"model": "m", "messages": [], "tools": [], "tool_choice": "auto", "parallel_tool_calls": True}
         result = rewrite_chat_body(body)
@@ -468,7 +463,6 @@ class TestBedrockToolScrubbing:
 
 
 class TestStreamUsageInjection:
-
     def test_stream_true_injects_include_usage(self):
         body = {"model": "m", "messages": [], "stream": True}
         result = rewrite_chat_body(body)
@@ -500,7 +494,24 @@ class TestStreamUsageInjection:
         assert result["stream_options"] == {"include_usage": True}
 
 
-class TestRewriteChatBodyAlias:
+class TestStripUnsupportedFields:
+    def test_vector_store_ids_stripped(self):
+        body = {"model": "m", "messages": [], "vector_store_ids": ["vs_abc"]}
+        result = rewrite_chat_body(body)
+        assert "vector_store_ids" not in result
 
+    def test_file_ids_stripped(self):
+        body = {"model": "m", "messages": [], "file_ids": ["file-123"]}
+        result = rewrite_chat_body(body)
+        assert "file_ids" not in result
+
+    def test_unsupported_fields_stripped_with_other_fields_preserved(self):
+        body = {"model": "m", "messages": [], "vector_store_ids": ["vs_abc"], "temperature": 0.5}
+        result = rewrite_chat_body(body)
+        assert "vector_store_ids" not in result
+        assert result["temperature"] == 0.5
+
+
+class TestRewriteChatBodyAlias:
     def test_sanitize_chat_body_is_alias_for_rewrite(self):
         assert sanitize_chat_body is rewrite_chat_body
