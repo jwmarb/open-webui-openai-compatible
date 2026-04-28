@@ -123,7 +123,7 @@ class TestSanitizeChatBody:
         assert len(result["tools"]) == 1
         assert result["stream_options"] == {"include_usage": True}
 
-    def test_strips_litellm_fields(self):
+    def test_passes_through_extra_fields(self):
         body = {
             "model": "gpt-4",
             "messages": [{"role": "user", "content": "hi"}],
@@ -136,10 +136,10 @@ class TestSanitizeChatBody:
             "litellm_logging_obj": {},
         }
         result = sanitize_chat_body(body)
-        assert result == {
-            "model": "gpt-4",
-            "messages": [{"role": "user", "content": "hi"}],
-        }
+        assert result["model"] == "gpt-4"
+        assert result["extra_body"] == {}
+        assert result["api_base"] == "http://example.com"
+        assert result["custom_llm_provider"] == "openai"
 
     def test_empty_body(self):
         assert sanitize_chat_body({}) == {}
@@ -180,9 +180,11 @@ class TestSanitizeChatBody:
         assert "functions" not in result
         assert "function_call" not in result
 
-    def test_strips_all_non_openai_fields(self):
+    def test_unknown_fields_passed_through(self):
         body = {"extra_body": {}, "api_base": "http://x", "custom_llm_provider": "openai", "litellm_call_id": "abc"}
-        assert sanitize_chat_body(body) == {}
+        result = sanitize_chat_body(body)
+        assert result["extra_body"] == {}
+        assert result["api_base"] == "http://x"
 
     def test_strips_legacy_function_calling(self):
         body = {

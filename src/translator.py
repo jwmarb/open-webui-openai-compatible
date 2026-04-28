@@ -1,8 +1,7 @@
 """Translation layer between Open WebUI and OpenAI API formats.
 
-Handles model list translation, request body rewriting (whitelist sanitization,
-Bedrock tool-field scrubbing, stream usage injection), and Claude thinking
-variant logic.
+Handles model list translation, request body rewriting (Bedrock tool-field
+scrubbing, stream usage injection), and Claude thinking variant logic.
 """
 
 from __future__ import annotations
@@ -21,37 +20,6 @@ ADAPTIVE_THINKING_CONFIG = ThinkingConfig(type="adaptive")
 MIN_MAX_TOKENS_EXTENDED = 64_000
 MIN_MAX_TOKENS_EXTENDED_SMALL = 32_000
 
-# https://platform.openai.com/docs/api-reference/chat/create
-OPENAI_CHAT_PARAMS: frozenset[str] = frozenset({
-    "model",
-    "messages",
-    "stream",
-    "stream_options",
-    "temperature",
-    "top_p",
-    "n",
-    "stop",
-    "max_tokens",
-    "max_completion_tokens",
-    "presence_penalty",
-    "frequency_penalty",
-    "logit_bias",
-    "logprobs",
-    "top_logprobs",
-    "user",
-    "tools",
-    "tool_choice",
-    "parallel_tool_calls",
-    "response_format",
-    "seed",
-    "service_tier",
-    "metadata",
-    "store",
-    "reasoning_effort",
-    "functions",
-    "function_call",
-})
-
 _DUMMY_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -62,7 +30,6 @@ _DUMMY_TOOL: dict[str, Any] = {
 }
 
 __all__ = [
-    "OPENAI_CHAT_PARAMS",
     "apply_thinking_params",
     "create_openai_error",
     "generate_thinking_variants",
@@ -214,10 +181,10 @@ def _ensure_stream_usage(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def rewrite_chat_body(body: dict[str, Any]) -> dict[str, Any]:
-    sanitized = {k: v for k, v in body.items() if k in OPENAI_CHAT_PARAMS}
-    sanitized = _scrub_bedrock_tool_fields(sanitized)
-    sanitized = _ensure_stream_usage(sanitized)
-    return sanitized
+    rewritten = {**body}
+    rewritten = _scrub_bedrock_tool_fields(rewritten)
+    rewritten = _ensure_stream_usage(rewritten)
+    return rewritten
 
 
 sanitize_chat_body = rewrite_chat_body

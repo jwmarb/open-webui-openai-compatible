@@ -418,9 +418,9 @@ class TestChatCompletionsEndpoint:
                 assert "budget_tokens" not in captured["thinking"]
                 assert captured["max_tokens"] >= 64000
 
-    # --- Request sanitization end-to-end ---
+    # --- Request rewriting end-to-end ---
 
-    def test_chat_sanitizes_litellm_fields(self):
+    def test_chat_passes_extra_fields_through(self):
         captured = {}
         mock_result = {
             "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "m",
@@ -446,10 +446,10 @@ class TestChatCompletionsEndpoint:
                     },
                 )
                 assert response.status_code == 200
-                assert "extra_body" not in captured
-                assert "api_base" not in captured
-                assert "custom_llm_provider" not in captured
                 assert captured["model"] == "m"
+                assert captured["extra_body"] == {}
+                assert captured["api_base"] == "http://x"
+                assert captured["custom_llm_provider"] == "openai"
 
     def test_chat_empty_body(self):
         captured = {}
