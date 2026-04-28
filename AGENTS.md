@@ -55,6 +55,7 @@ open-webui-openai-compatible/
 |------|----------|-------|
 | Add/modify routes | `src/main.py` | Only 3 routes exist — no middleware |
 | Allow new chat param | `OPENAI_CHAT_PARAMS` in `src/translator.py` | Whitelist; `thinking` bypasses it |
+| Change Bedrock tool scrubbing | `_scrub_bedrock_tool_fields()` in `src/translator.py` | Runs after whitelist, before stream injection |
 | Change thinking budget | Constants at top of `src/translator.py` | `EXTENDED_THINKING_CONFIG`, `MIN_MAX_TOKENS_*` |
 | Add response model | `src/models.py` | Pydantic types matching OpenAI schema |
 | Change upstream URLs | `src/client.py` | `/api/models`, `/api/chat/completions` |
@@ -71,7 +72,7 @@ Single-package FastAPI proxy. Source lives in `src/`, no sub-packages.
 |--------|------|
 | `src/settings.py` | Pydantic Settings singleton — **instantiated at import time** |
 | `src/client.py` | Async httpx wrapper; accepts `base_url` and `token` via constructor (dependency injection) |
-| `src/translator.py` | Model list translation, request body sanitization, Claude thinking variant logic |
+| `src/translator.py` | Model list translation, request body rewriting (whitelist + Bedrock scrubbing + stream usage), Claude thinking variant logic |
 | `src/main.py` | FastAPI app with 3 routes: `/health`, `/v1/models`, `/v1/chat/completions` |
 | `src/models.py` | Pydantic response types (OpenAI schema shapes) — used by `translator.py` for validated serialization |
 | `tui.py` | Standalone Textual TUI chat client — talks to the **proxy**, not upstream directly. Not part of the `src` package. |
@@ -87,8 +88,9 @@ Single-package FastAPI proxy. Source lives in `src/`, no sub-packages.
 | `health` | Route | `main.py:74` | `GET /health` |
 | `models` | Route | `main.py:79` | `GET /v1/models` → upstream `GET /api/models` |
 | `chat_completions` | Route | `main.py:93` | `POST /v1/chat/completions` → upstream `POST /api/chat/completions` |
-| `translate_models_response` | Func | `translator.py:131` | Raw upstream → OpenAI `ModelList` |
-| `sanitize_chat_body` | Func | `translator.py:147` | Strip non-OpenAI fields via `OPENAI_CHAT_PARAMS` whitelist |
+| `translate_models_response` | Func | `translator.py` | Raw upstream → OpenAI `ModelList` |
+| `rewrite_chat_body` | Func | `translator.py` | Whitelist sanitization + Bedrock tool scrubbing + stream usage injection |
+| `sanitize_chat_body` | Alias | `translator.py` | Alias for `rewrite_chat_body` (backward compat) |
 | `resolve_thinking_model` | Func | `translator.py:101` | Strip `:extended`/`:adaptive` suffix, return thinking config |
 | `apply_thinking_params` | Func | `translator.py:115` | Inject `thinking` param + ensure sufficient `max_tokens` |
 | `generate_thinking_variants` | Func | `translator.py:79` | Create virtual `:extended`/`:adaptive` model entries |
@@ -101,7 +103,10 @@ Single-package FastAPI proxy. Source lives in `src/`, no sub-packages.
 ### Request flow
 
 1. Client sends OpenAI-compatible request to proxy
-2. `sanitize_chat_body()` strips non-OpenAI fields (e.g. LiteLLM's `extra_body`, `api_base`)
+2. `rewrite_chat_body()` processes the request in three passes:
+   a. **Whitelist sanitization** — strips non-OpenAI fields (e.g. LiteLLM's `extra_body`, `api_base`)
+   b. **Bedrock tool scrubbing** — removes empty `tools`/`tool_choice`/`parallel_tool_calls`, coerces `tool_choice:"any"/"required"` → `"auto"`, strips `tool_choice:"none"` and its tools, injects a dummy tool when conversation history references tools but the request declares none, removes legacy `functions`/`function_call`
+   c. **Stream usage injection** — ensures `stream_options.include_usage=true` on streaming requests
 3. `resolve_thinking_model()` checks for `:extended`/`:adaptive` suffix, strips it, returns thinking config
 4. `apply_thinking_params()` injects `thinking` param and ensures `max_tokens` is sufficient
 5. `WebClient` forwards to upstream Open WebUI `/api/chat/completions`
@@ -127,7 +132,7 @@ Models with `"claude"` in the ID get virtual thinking variants appended to `/v1/
 - `:extended` — `thinking.type=enabled` with `budget_tokens` (32k standard, 16k for Haiku)
 - `:adaptive` — `thinking.type=adaptive` (not generated for Haiku, which doesn't support it)
 
-The variant suffix is stripped before forwarding to upstream. The `thinking` param is injected *after* `sanitize_chat_body()` runs, so it is not in `OPENAI_CHAT_PARAMS` and doesn't need to be.
+The variant suffix is stripped before forwarding to upstream. The `thinking` param is injected *after* `rewrite_chat_body()` runs, so it is not in `OPENAI_CHAT_PARAMS` and doesn't need to be.
 
 ## Critical gotcha: settings singleton
 
@@ -156,11 +161,25 @@ The variant suffix is stripped before forwarding to upstream. The `thinking` par
 - **Env management**: conda (`conda activate open-webui-openai-compatible`).
 - **All config in `pyproject.toml`** — no standalone ruff.toml, pyrightconfig.json, etc.
 
-## Request body sanitization
+## Request body rewriting
 
-`OPENAI_CHAT_PARAMS` in `translator.py` is a whitelist of standard OpenAI chat completion parameters. All other fields are stripped before forwarding. This prevents LiteLLM-injected fields like `extra_body`, `api_base`, and `custom_llm_provider` from reaching upstream (which would cause 400 errors from strict model providers like Bedrock).
+`rewrite_chat_body()` in `translator.py` applies three passes:
 
-To allow a new parameter through, add it to `OPENAI_CHAT_PARAMS`. The `thinking` param bypasses this because it's injected *after* sanitization by the thinking variant logic.
+1. **Whitelist sanitization**: `OPENAI_CHAT_PARAMS` is a frozenset of standard OpenAI chat completion parameters. All other fields are stripped. This prevents LiteLLM-injected fields like `extra_body`, `api_base`, and `custom_llm_provider` from reaching upstream (which would cause 400 errors from strict model providers like Bedrock).
+
+2. **Bedrock tool-field scrubbing** (ported from `opencode-openwebui-auth`):
+   - Empty `tools` list → removes `tools`, `tool_choice`, `parallel_tool_calls`
+   - If conversation history references tool calls/results but no tools declared → injects a dummy tool so LiteLLM+Bedrock validation passes
+   - `tool_choice: "none"` → strips tools entirely (Bedrock doesn't support it)
+   - `tool_choice: "any"` or `"required"` → coerced to `"auto"` (closest Bedrock equivalent)
+   - `tool_choice: {"type": "none"/"any"/"required"}` → same dict-form handling
+   - Legacy `functions`/`function_call` fields → always stripped (Bedrock chokes on these)
+
+3. **Stream usage injection**: When `stream: true`, ensures `stream_options.include_usage` is set to `true` so token usage data comes back in the SSE stream.
+
+To allow a new parameter through the whitelist, add it to `OPENAI_CHAT_PARAMS`. The `thinking` param bypasses this because it's injected *after* rewriting by the thinking variant logic.
+
+`sanitize_chat_body` is retained as an alias for `rewrite_chat_body` for backward compatibility.
 
 ## Upstream endpoint mapping
 

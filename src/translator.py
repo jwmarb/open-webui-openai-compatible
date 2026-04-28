@@ -1,7 +1,8 @@
 """Translation layer between Open WebUI and OpenAI API formats.
 
-Handles model list translation, request body sanitization,
-and Claude thinking variant logic.
+Handles model list translation, request body rewriting (whitelist sanitization,
+Bedrock tool-field scrubbing, stream usage injection), and Claude thinking
+variant logic.
 """
 
 from __future__ import annotations
@@ -51,12 +52,22 @@ OPENAI_CHAT_PARAMS: frozenset[str] = frozenset({
     "function_call",
 })
 
+_DUMMY_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "dummy_tool",
+        "description": "placeholder tool — never call",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
 __all__ = [
     "OPENAI_CHAT_PARAMS",
     "apply_thinking_params",
     "create_openai_error",
     "generate_thinking_variants",
     "resolve_thinking_model",
+    "rewrite_chat_body",
     "sanitize_chat_body",
     "translate_models_response",
 ]
@@ -144,8 +155,72 @@ def translate_models_response(raw: dict[str, Any]) -> dict[str, Any]:
     return result.model_dump()
 
 
-def sanitize_chat_body(body: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in body.items() if k in OPENAI_CHAT_PARAMS}
+def _messages_reference_tools(messages: Any) -> bool:
+    if not isinstance(messages, list):
+        return False
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "tool":
+            return True
+        tool_calls = msg.get("tool_calls")
+        if isinstance(tool_calls, list) and len(tool_calls) > 0:
+            return True
+        if msg.get("tool_call_id"):
+            return True
+    return False
+
+
+def _scrub_bedrock_tool_fields(body: dict[str, Any]) -> dict[str, Any]:
+    tools = body.get("tools")
+    has_tools = isinstance(tools, list) and len(tools) > 0
+
+    if not has_tools:
+        body.pop("tools", None)
+        body.pop("tool_choice", None)
+        body.pop("parallel_tool_calls", None)
+
+        if _messages_reference_tools(body.get("messages")):
+            body["tools"] = [_DUMMY_TOOL]
+    else:
+        choice = body.get("tool_choice")
+        if isinstance(choice, dict):
+            choice_type = choice.get("type")
+        elif isinstance(choice, str):
+            choice_type = choice
+        else:
+            choice_type = None
+
+        if choice_type == "none":
+            body.pop("tools", None)
+            body.pop("tool_choice", None)
+            body.pop("parallel_tool_calls", None)
+        elif choice_type in ("any", "required"):
+            body["tool_choice"] = "auto"
+
+    body.pop("functions", None)
+    body.pop("function_call", None)
+    return body
+
+
+def _ensure_stream_usage(body: dict[str, Any]) -> dict[str, Any]:
+    if body.get("stream") is True:
+        opts = body.get("stream_options")
+        if isinstance(opts, dict):
+            opts["include_usage"] = True
+        else:
+            body["stream_options"] = {"include_usage": True}
+    return body
+
+
+def rewrite_chat_body(body: dict[str, Any]) -> dict[str, Any]:
+    sanitized = {k: v for k, v in body.items() if k in OPENAI_CHAT_PARAMS}
+    sanitized = _scrub_bedrock_tool_fields(sanitized)
+    sanitized = _ensure_stream_usage(sanitized)
+    return sanitized
+
+
+sanitize_chat_body = rewrite_chat_body
 
 
 def create_openai_error(

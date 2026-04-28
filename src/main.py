@@ -17,7 +17,7 @@ from .translator import (
     apply_thinking_params,
     create_openai_error,
     resolve_thinking_model,
-    sanitize_chat_body,
+    rewrite_chat_body,
     translate_models_response,
 )
 
@@ -115,7 +115,7 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
         len(raw_body.get("messages", [])),
     )
     logger.debug("Raw request body keys: %s", list(raw_body.keys()))
-    body: dict[str, Any] = sanitize_chat_body(raw_body)
+    body: dict[str, Any] = rewrite_chat_body(raw_body)
     logger.debug("Sanitized body keys: %s", list(body.keys()))
 
     model = body.get("model", "")

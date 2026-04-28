@@ -6,6 +6,7 @@ from src.translator import (
     create_openai_error,
     generate_thinking_variants,
     resolve_thinking_model,
+    rewrite_chat_body,
     sanitize_chat_body,
     translate_models_response,
 )
@@ -112,10 +113,15 @@ class TestSanitizeChatBody:
             "messages": [{"role": "user", "content": "hi"}],
             "stream": True,
             "temperature": 0.7,
-            "tools": [],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
             "tool_choice": "auto",
         }
-        assert sanitize_chat_body(body) == body
+        result = sanitize_chat_body(body)
+        assert result["model"] == "gpt-4"
+        assert result["temperature"] == 0.7
+        assert result["tool_choice"] == "auto"
+        assert len(result["tools"]) == 1
+        assert result["stream_options"] == {"include_usage": True}
 
     def test_strips_litellm_fields(self):
         body = {
@@ -138,12 +144,12 @@ class TestSanitizeChatBody:
     def test_empty_body(self):
         assert sanitize_chat_body({}) == {}
 
-    def test_preserves_all_openai_params(self):
+    def test_preserves_most_openai_params(self):
         body = {
             "model": "gpt-4",
             "messages": [],
             "stream": True,
-            "stream_options": {"include_usage": True},
+            "stream_options": {"include_usage": False},
             "temperature": 0.5,
             "top_p": 0.9,
             "n": 1,
@@ -156,7 +162,7 @@ class TestSanitizeChatBody:
             "logprobs": True,
             "top_logprobs": 5,
             "user": "user-1",
-            "tools": [],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
             "tool_choice": "auto",
             "parallel_tool_calls": True,
             "response_format": {"type": "json_object"},
@@ -165,14 +171,29 @@ class TestSanitizeChatBody:
             "metadata": {},
             "store": True,
             "reasoning_effort": "medium",
-            "functions": [],
-            "function_call": "auto",
         }
-        assert sanitize_chat_body(body) == body
+        result = sanitize_chat_body(body)
+        assert result["model"] == "gpt-4"
+        assert result["temperature"] == 0.5
+        assert result["reasoning_effort"] == "medium"
+        assert result["stream_options"] == {"include_usage": True}
+        assert "functions" not in result
+        assert "function_call" not in result
 
     def test_strips_all_non_openai_fields(self):
         body = {"extra_body": {}, "api_base": "http://x", "custom_llm_provider": "openai", "litellm_call_id": "abc"}
         assert sanitize_chat_body(body) == {}
+
+    def test_strips_legacy_function_calling(self):
+        body = {
+            "model": "gpt-4",
+            "messages": [],
+            "functions": [{"name": "f"}],
+            "function_call": "auto",
+        }
+        result = sanitize_chat_body(body)
+        assert "functions" not in result
+        assert "function_call" not in result
 
 
 class TestGenerateThinkingVariants:
@@ -309,3 +330,175 @@ class TestApplyThinkingParams:
         body = {"model": "opus", "messages": [], "max_tokens": 0}
         result = apply_thinking_params(body, ThinkingConfig(type="enabled", budget_tokens=32000))
         assert result["max_tokens"] == 64000
+
+
+class TestBedrockToolScrubbing:
+
+    def test_empty_tools_list_removed(self):
+        body = {"model": "m", "messages": [], "tools": [], "tool_choice": "auto", "parallel_tool_calls": True}
+        result = rewrite_chat_body(body)
+        assert "tools" not in result
+        assert "tool_choice" not in result
+        assert "parallel_tool_calls" not in result
+
+    def test_dummy_tool_injected_when_messages_reference_tools(self):
+        body = {
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "tool_calls": [{"id": "tc1", "function": {"name": "f"}}]},
+                {"role": "tool", "tool_call_id": "tc1", "content": "result"},
+            ],
+            "tools": [],
+        }
+        result = rewrite_chat_body(body)
+        assert len(result["tools"]) == 1
+        assert result["tools"][0]["function"]["name"] == "dummy_tool"
+        assert "tool_choice" not in result
+
+    def test_no_dummy_tool_when_messages_clean(self):
+        body = {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [],
+        }
+        result = rewrite_chat_body(body)
+        assert "tools" not in result
+
+    def test_tool_choice_none_strips_tools(self):
+        body = {
+            "model": "m",
+            "messages": [],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+            "tool_choice": "none",
+        }
+        result = rewrite_chat_body(body)
+        assert "tools" not in result
+        assert "tool_choice" not in result
+        assert "parallel_tool_calls" not in result
+
+    def test_tool_choice_any_coerced_to_auto(self):
+        body = {
+            "model": "m",
+            "messages": [],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+            "tool_choice": "any",
+        }
+        result = rewrite_chat_body(body)
+        assert result["tool_choice"] == "auto"
+        assert len(result["tools"]) == 1
+
+    def test_tool_choice_required_coerced_to_auto(self):
+        body = {
+            "model": "m",
+            "messages": [],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+            "tool_choice": "required",
+        }
+        result = rewrite_chat_body(body)
+        assert result["tool_choice"] == "auto"
+
+    def test_tool_choice_dict_type_none_strips_tools(self):
+        body = {
+            "model": "m",
+            "messages": [],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+            "tool_choice": {"type": "none"},
+        }
+        result = rewrite_chat_body(body)
+        assert "tools" not in result
+        assert "tool_choice" not in result
+
+    def test_tool_choice_dict_type_any_coerced(self):
+        body = {
+            "model": "m",
+            "messages": [],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+            "tool_choice": {"type": "any"},
+        }
+        result = rewrite_chat_body(body)
+        assert result["tool_choice"] == "auto"
+
+    def test_tool_choice_auto_preserved(self):
+        body = {
+            "model": "m",
+            "messages": [],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+            "tool_choice": "auto",
+        }
+        result = rewrite_chat_body(body)
+        assert result["tool_choice"] == "auto"
+        assert len(result["tools"]) == 1
+
+    def test_legacy_functions_stripped(self):
+        body = {
+            "model": "m",
+            "messages": [],
+            "functions": [{"name": "f"}],
+            "function_call": "auto",
+        }
+        result = rewrite_chat_body(body)
+        assert "functions" not in result
+        assert "function_call" not in result
+
+    def test_messages_with_tool_call_id_detected(self):
+        body = {
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "tool", "tool_call_id": "tc1", "content": "res"},
+            ],
+        }
+        result = rewrite_chat_body(body)
+        assert len(result["tools"]) == 1
+        assert result["tools"][0]["function"]["name"] == "dummy_tool"
+
+    def test_parallel_tool_calls_stripped_with_tool_choice_none(self):
+        body = {
+            "model": "m",
+            "messages": [],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+            "tool_choice": "none",
+            "parallel_tool_calls": True,
+        }
+        result = rewrite_chat_body(body)
+        assert "parallel_tool_calls" not in result
+
+
+class TestStreamUsageInjection:
+
+    def test_stream_true_injects_include_usage(self):
+        body = {"model": "m", "messages": [], "stream": True}
+        result = rewrite_chat_body(body)
+        assert result["stream_options"] == {"include_usage": True}
+
+    def test_stream_true_overrides_include_usage_false(self):
+        body = {"model": "m", "messages": [], "stream": True, "stream_options": {"include_usage": False}}
+        result = rewrite_chat_body(body)
+        assert result["stream_options"]["include_usage"] is True
+
+    def test_stream_true_preserves_other_stream_options(self):
+        body = {"model": "m", "messages": [], "stream": True, "stream_options": {"other_opt": "val"}}
+        result = rewrite_chat_body(body)
+        assert result["stream_options"] == {"include_usage": True, "other_opt": "val"}
+
+    def test_stream_false_no_injection(self):
+        body = {"model": "m", "messages": [], "stream": False}
+        result = rewrite_chat_body(body)
+        assert "stream_options" not in result
+
+    def test_no_stream_key_no_injection(self):
+        body = {"model": "m", "messages": []}
+        result = rewrite_chat_body(body)
+        assert "stream_options" not in result
+
+    def test_stream_true_already_has_include_usage_true(self):
+        body = {"model": "m", "messages": [], "stream": True, "stream_options": {"include_usage": True}}
+        result = rewrite_chat_body(body)
+        assert result["stream_options"] == {"include_usage": True}
+
+
+class TestRewriteChatBodyAlias:
+
+    def test_sanitize_chat_body_is_alias_for_rewrite(self):
+        assert sanitize_chat_body is rewrite_chat_body
