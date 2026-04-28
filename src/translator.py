@@ -95,7 +95,7 @@ def apply_thinking_params(body: dict[str, Any], thinking_config: ThinkingConfig)
 
     budget = thinking_config.budget_tokens or 0
     if budget > 0:
-        min_tokens = MIN_MAX_TOKENS_EXTENDED_SMALL if budget <= 16_000 else MIN_MAX_TOKENS_EXTENDED
+        min_tokens = max(budget * 2, MIN_MAX_TOKENS_EXTENDED_SMALL)
     else:
         min_tokens = MIN_MAX_TOKENS_EXTENDED
 
@@ -148,7 +148,7 @@ def _scrub_bedrock_tool_fields(body: dict[str, Any]) -> dict[str, Any]:
         body.pop("parallel_tool_calls", None)
 
         if _messages_reference_tools(body.get("messages")):
-            body["tools"] = [_DUMMY_TOOL]
+            body["tools"] = [_DUMMY_TOOL.copy()]
     else:
         choice = body.get("tool_choice")
         if isinstance(choice, dict):
@@ -174,7 +174,7 @@ def _ensure_stream_usage(body: dict[str, Any]) -> dict[str, Any]:
     if body.get("stream") is True:
         opts = body.get("stream_options")
         if isinstance(opts, dict):
-            opts["include_usage"] = True
+            body["stream_options"] = {**opts, "include_usage": True}
         else:
             body["stream_options"] = {"include_usage": True}
     return body

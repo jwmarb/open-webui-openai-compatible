@@ -7,7 +7,8 @@ __all__ = ["Settings", "settings"]
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8")
 
     open_webui_url: str
     user_token: str
@@ -31,4 +32,5 @@ class Settings(BaseSettings):
         return value.rstrip("/")
 
 
-settings = Settings()  # type: ignore[call-arg]  # pydantic-settings injects from env
+# type: ignore[call-arg]  # pydantic-settings injects from env
+settings = Settings()

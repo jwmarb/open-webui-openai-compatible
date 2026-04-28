@@ -30,34 +30,6 @@ class ThinkingConfig(BaseModel):
     budget_tokens: int | None = None
 
 
-class ChatCompletionChoice(BaseModel):
-    """A single choice in a chat completion response."""
-
-    index: int = 0
-    message: dict[str, object] | None = None
-    delta: dict[str, object] | None = None
-    finish_reason: str | None = None
-
-
-class UsageInfo(BaseModel):
-    """Token usage statistics for a chat completion."""
-
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-
-
-class ChatCompletionResponse(BaseModel):
-    """Response shape for POST /v1/chat/completions (non-streaming)."""
-
-    id: str = ""
-    object: str = "chat.completion"
-    created: int = 0
-    model: str = ""
-    choices: list[ChatCompletionChoice]
-    usage: UsageInfo | None = None
-
-
 class OpenAIErrorDetail(BaseModel):
     """Error detail nested inside an OpenAI error response."""
 
