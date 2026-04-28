@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any, Final
 
@@ -73,7 +74,9 @@ __all__ = ["app"]
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     app.state.web_client = WebClient(
-        settings.open_webui_url, settings.user_token, request_timeout=settings.request_timeout,
+        settings.open_webui_url,
+        settings.user_token,
+        request_timeout=settings.request_timeout,
     )
     yield
     await app.state.web_client.aclose()
@@ -129,39 +132,74 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
     logger.debug("Forwarding to upstream: model=%s stream=%s", body.get("model"), is_stream)
 
     if is_stream:
-        stream_gen = await request.app.state.web_client.post_chat_completion(
-            body, stream=True
-        )
-
-        # Pre-read the first chunk so errors raised before any data
-        # (e.g. upstream 400 on raise_for_status) surface here where
-        # we can still return a proper HTTP error response.
+        # Retry loop: upstream occasionally returns an empty stream (HTTP 200
+        # but zero bytes).  Since we pre-read the first chunk *before*
+        # constructing StreamingResponse, we can transparently retry without
+        # the client ever knowing.
+        max_retries = settings.stream_empty_retry_max
+        stream_gen: AsyncGenerator[bytes, None] | None = None
         first_chunk: bytes | None = None
-        try:
-            first_chunk = await anext(stream_gen.__aiter__(), None)
-        except httpx.HTTPStatusError as exc:
-            err = create_openai_error(
-                "Upstream request failed", "api_error", exc.response.status_code,
+
+        for attempt in range(1, max_retries + 2):
+            stream_gen = await request.app.state.web_client.post_chat_completion(
+                body,
+                stream=True,
             )
-            return JSONResponse(content=err, status_code=exc.response.status_code)
-        except (httpx.ReadTimeout, httpx.ConnectTimeout) as exc:
-            logger.error("Upstream timeout during stream pre-read: %s", exc)
-            err = create_openai_error(
-                "Upstream request timed out", "timeout_error", 504,
-            )
-            return JSONResponse(content=err, status_code=504)
-        except (httpx.RemoteProtocolError, httpx.ReadError) as exc:
-            logger.error("Upstream connection error during stream pre-read: %s", exc)
-            err = create_openai_error(
-                "Upstream connection failed", "api_error", 502,
-            )
-            return JSONResponse(content=err, status_code=502)
-        except Exception as exc:
-            logger.exception("Unexpected error during stream pre-read: %s", type(exc).__name__)
-            err = create_openai_error(
-                "Upstream service unavailable", "server_error", 502,
-            )
-            return JSONResponse(content=err, status_code=502)
+
+            try:
+                first_chunk = await anext(stream_gen, None)  # type: ignore[arg-type]  # overload returns AsyncIterator but runtime is AsyncGenerator
+            except httpx.HTTPStatusError as exc:
+                err = create_openai_error(
+                    "Upstream request failed",
+                    "api_error",
+                    exc.response.status_code,
+                )
+                return JSONResponse(content=err, status_code=exc.response.status_code)
+            except (httpx.ReadTimeout, httpx.ConnectTimeout) as exc:
+                logger.error("Upstream timeout during stream pre-read: %s", exc)
+                err = create_openai_error(
+                    "Upstream request timed out",
+                    "timeout_error",
+                    504,
+                )
+                return JSONResponse(content=err, status_code=504)
+            except (httpx.RemoteProtocolError, httpx.ReadError) as exc:
+                logger.error("Upstream connection error during stream pre-read: %s", exc)
+                err = create_openai_error(
+                    "Upstream connection failed",
+                    "api_error",
+                    502,
+                )
+                return JSONResponse(content=err, status_code=502)
+            except Exception as exc:
+                logger.exception("Unexpected error during stream pre-read: %s", type(exc).__name__)
+                err = create_openai_error(
+                    "Upstream service unavailable",
+                    "server_error",
+                    502,
+                )
+                return JSONResponse(content=err, status_code=502)
+
+            if first_chunk is not None:
+                break
+
+            assert stream_gen is not None
+            await stream_gen.aclose()
+            if attempt <= max_retries:
+                logger.warning(
+                    "Empty stream from upstream for model=%s (attempt %d/%d), retrying",
+                    model,
+                    attempt,
+                    max_retries + 1,
+                )
+            else:
+                logger.error(
+                    "Empty stream from upstream for model=%s after %d attempts, giving up",
+                    model,
+                    attempt,
+                )
+
+        assert stream_gen is not None
 
         async def event_stream():
             finish_reason: str | None = None
@@ -184,32 +222,41 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
                 else:
                     logger.info(
                         "Stream ended for model=%s finish_reason=%s",
-                        model, finish_reason,
+                        model,
+                        finish_reason,
                     )
             except httpx.HTTPStatusError as exc:
                 err = create_openai_error(
-                    "Upstream request failed", "api_error", exc.response.status_code,
+                    "Upstream request failed",
+                    "api_error",
+                    exc.response.status_code,
                 )
                 yield f"data: {json.dumps(err)}\n\n".encode()
                 yield b"data: [DONE]\n\n"
             except (httpx.ReadTimeout, httpx.ConnectTimeout) as exc:
                 logger.error("Upstream timeout mid-stream: %s", exc)
                 err = create_openai_error(
-                    "Upstream request timed out", "timeout_error", 504,
+                    "Upstream request timed out",
+                    "timeout_error",
+                    504,
                 )
                 yield f"data: {json.dumps(err)}\n\n".encode()
                 yield b"data: [DONE]\n\n"
             except (httpx.RemoteProtocolError, httpx.ReadError) as exc:
                 logger.error("Upstream connection error mid-stream: %s", exc)
                 err = create_openai_error(
-                    "Upstream connection failed", "api_error", 502,
+                    "Upstream connection failed",
+                    "api_error",
+                    502,
                 )
                 yield f"data: {json.dumps(err)}\n\n".encode()
                 yield b"data: [DONE]\n\n"
             except Exception as exc:
                 logger.exception("Unexpected error mid-stream: %s", type(exc).__name__)
                 err = create_openai_error(
-                    "Upstream service unavailable", "server_error", 502,
+                    "Upstream service unavailable",
+                    "server_error",
+                    502,
                 )
                 yield f"data: {json.dumps(err)}\n\n".encode()
                 yield b"data: [DONE]\n\n"
@@ -218,7 +265,8 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
                 # Log so silent stream deaths become visible.
                 logger.warning(
                     "Stream interrupted by %s for model=%s",
-                    type(exc).__name__, model,
+                    type(exc).__name__,
+                    model,
                 )
                 raise
             finally:
@@ -252,7 +300,9 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
     except ValueError as exc:
         logger.error("Upstream empty response (non-streaming): %s", exc)
         err = create_openai_error(
-            "Upstream returned empty response body", "server_error", 502,
+            "Upstream returned empty response body",
+            "server_error",
+            502,
         )
         return JSONResponse(content=err, status_code=502)
     except Exception:

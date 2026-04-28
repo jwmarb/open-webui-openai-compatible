@@ -30,7 +30,6 @@ def _make_mock_webclient(get_models=None, post_chat_completion=None):
 
 
 class TestHealth:
-
     def test_health(self):
         mock = _make_mock_webclient()
         with patch("src.main.WebClient", return_value=mock):
@@ -41,7 +40,6 @@ class TestHealth:
 
 
 class TestModelsEndpoint:
-
     def test_models_success(self):
         mock_raw = {
             "data": [
@@ -96,7 +94,6 @@ class TestModelsEndpoint:
 
 
 class TestChatCompletionsEndpoint:
-
     def test_chat_non_streaming(self):
         mock_result = {
             "id": "chatcmpl-123",
@@ -368,7 +365,10 @@ class TestChatCompletionsEndpoint:
     def test_chat_thinking_variant_extended_e2e(self):
         captured = {}
         mock_result = {
-            "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "opus",
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "opus",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
         }
 
@@ -393,7 +393,10 @@ class TestChatCompletionsEndpoint:
     def test_chat_thinking_variant_adaptive_e2e(self):
         captured = {}
         mock_result = {
-            "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "sonnet",
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "sonnet",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
         }
 
@@ -423,7 +426,10 @@ class TestChatCompletionsEndpoint:
     def test_chat_passes_extra_fields_through(self):
         captured = {}
         mock_result = {
-            "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "m",
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "m",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
         }
 
@@ -454,7 +460,10 @@ class TestChatCompletionsEndpoint:
     def test_chat_empty_body(self):
         captured = {}
         mock_result = {
-            "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "",
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "stop"}],
         }
 
@@ -472,7 +481,6 @@ class TestChatCompletionsEndpoint:
 
 
 class TestModelsThinkingVariants:
-
     def test_models_with_claude_includes_thinking_variants(self):
         mock_raw = {
             "data": [
@@ -498,7 +506,6 @@ class TestModelsThinkingVariants:
 
 
 class TestErrorResponseShape:
-
     def _assert_openai_error_shape(self, body: dict):
         assert set(body.keys()) == {"error"}, f"Expected only 'error' key, got {set(body.keys())}"
         err = body["error"]
@@ -626,7 +633,6 @@ class TestErrorResponseShape:
 
 
 class TestExtractFinishReason:
-
     def test_finish_reason_stop(self):
         chunk = b'data: {"choices":[{"finish_reason":"stop"}]}\n\n'
         assert _extract_finish_reason(chunk) == "stop"
@@ -648,7 +654,7 @@ class TestExtractFinishReason:
         assert _extract_finish_reason(chunk) is None
 
     def test_finish_reason_done_marker_returns_none(self):
-        chunk = b'data: [DONE]\n\n'
+        chunk = b"data: [DONE]\n\n"
         assert _extract_finish_reason(chunk) is None
 
     def test_finish_reason_malformed_json(self):
@@ -666,6 +672,7 @@ class TestExtractFinishReason:
     def test_finish_reason_multiple_choices_non_null(self):
         chunk = b'data: {"choices":[{"finish_reason":"stop"},{"finish_reason":"length"}]}\n\n'
         assert _extract_finish_reason(chunk) == "stop"
+
         async def fake_post_null(body, stream=False):
             raise ValueError("Upstream returned empty or null response body")
 
@@ -700,3 +707,157 @@ class TestExtractFinishReason:
                 body = response.json()
                 assert body["error"]["type"] == "timeout_error"
                 assert body["error"]["code"] == 504
+
+
+class TestStreamEmptyRetry:
+    def test_retry_succeeds_on_second_attempt(self):
+        call_count = 0
+
+        async def fake_post_stream(body, stream=False):
+            nonlocal call_count
+            call_count += 1
+
+            if call_count == 1:
+
+                async def empty_gen():
+                    return
+                    yield  # noqa: F841
+
+                return empty_gen()
+
+            async def real_gen():
+                yield b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
+                yield b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+
+            return real_gen()
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
+
+        with patch("src.main.WebClient", return_value=mock), patch("src.main.settings") as mock_settings:
+            mock_settings.stream_empty_retry_max = 3
+            mock_settings.log_level = "WARNING"
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
+                )
+                assert response.status_code == 200
+                lines = [ln for ln in response.text.strip().split("\n") if ln.startswith("data: ")]
+                assert len(lines) == 2
+                assert call_count == 2
+
+    def test_retry_exhausted_returns_injected_stop(self):
+        call_count = 0
+
+        async def fake_post_stream(body, stream=False):
+            nonlocal call_count
+            call_count += 1
+
+            async def empty_gen():
+                return
+                yield  # noqa: F841
+
+            return empty_gen()
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
+
+        with patch("src.main.WebClient", return_value=mock), patch("src.main.settings") as mock_settings:
+            mock_settings.stream_empty_retry_max = 2
+            mock_settings.log_level = "WARNING"
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
+                )
+                assert response.status_code == 200
+                lines = [ln for ln in response.text.strip().split("\n") if ln.startswith("data: ")]
+                last_payload = json.loads(lines[-1].removeprefix("data: "))
+                assert last_payload["choices"][0]["finish_reason"] == "stop"
+                expected_calls = 1 + mock_settings.stream_empty_retry_max
+                assert call_count == expected_calls
+
+    def test_retry_disabled_when_max_is_zero(self):
+        call_count = 0
+
+        async def fake_post_stream(body, stream=False):
+            nonlocal call_count
+            call_count += 1
+
+            async def empty_gen():
+                return
+                yield  # noqa: F841
+
+            return empty_gen()
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
+
+        with patch("src.main.WebClient", return_value=mock), patch("src.main.settings") as mock_settings:
+            mock_settings.stream_empty_retry_max = 0
+            mock_settings.log_level = "WARNING"
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
+                )
+                assert response.status_code == 200
+                assert call_count == 1
+
+    def test_no_retry_when_first_chunk_has_data(self):
+        call_count = 0
+
+        async def fake_post_stream(body, stream=False):
+            nonlocal call_count
+            call_count += 1
+
+            async def real_gen():
+                yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+                yield b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+
+            return real_gen()
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
+
+        with patch("src.main.WebClient", return_value=mock), patch("src.main.settings") as mock_settings:
+            mock_settings.stream_empty_retry_max = 3
+            mock_settings.log_level = "WARNING"
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
+                )
+                assert response.status_code == 200
+                assert call_count == 1
+
+    def test_error_during_retry_is_not_retried(self):
+        call_count = 0
+
+        async def fake_post_stream(body, stream=False):
+            nonlocal call_count
+            call_count += 1
+
+            if call_count == 1:
+
+                async def empty_gen():
+                    return
+                    yield  # noqa: F841
+
+                return empty_gen()
+
+            async def error_gen():
+                raise httpx.ReadTimeout("timed out")
+                yield  # noqa: F841
+
+            return error_gen()
+
+        mock = _make_mock_webclient(post_chat_completion=fake_post_stream)
+
+        with patch("src.main.WebClient", return_value=mock), patch("src.main.settings") as mock_settings:
+            mock_settings.stream_empty_retry_max = 3
+            mock_settings.log_level = "WARNING"
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
+                )
+                assert response.status_code == 504
+                assert call_count == 2
