@@ -43,6 +43,9 @@ Clients speak OpenAI's API format. The proxy translates those requests to Open W
 | `OPEN_WEBUI_URL` | Yes | — | Base URL of your Open WebUI instance |
 | `USER_TOKEN` | Yes | — | JWT token obtained from logging into Open WebUI |
 | `PORT` | No | `8000` | Port the proxy server listens on |
+| `REQUEST_TIMEOUT` | No | `300` | Upstream request timeout in seconds (10–3600) |
+| `STREAM_EMPTY_RETRY_MAX` | No | `3` | Max retries for empty upstream streams (0–10) |
+| `LOG_LEVEL` | No | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) |
 
 1. **Configure the `.env` file**: Run the following:
 
@@ -56,6 +59,7 @@ From there, edit the file and set the values appropriately. Use `<your-jwt-from-
 OPEN_WEBUI_URL=https://your-open-webui-instance.example.com
 USER_TOKEN=<your-jwt-from-login>
 PORT=8000
+LOG_LEVEL=INFO
 ```
 
 ### Quick Start (Local) 💻
@@ -188,6 +192,17 @@ Set `PROXY_URL` in `.env` or as an environment variable to point at a non-defaul
 | `Shift+Enter` | Insert newline |
 | `Ctrl+N` | New chat (clear history) |
 | `Ctrl+Q` | Quit |
+
+## Request Handling 🔧
+
+The proxy doesn't just forward requests — it applies several transformations to maximize compatibility with upstream providers (particularly AWS Bedrock via LiteLLM):
+
+- **Bedrock tool-field scrubbing** — Removes empty `tools` arrays, coerces unsupported `tool_choice` values (`"any"`, `"required"`, `"none"`) to Bedrock-compatible equivalents, strips legacy `functions`/`function_call` fields, and injects a placeholder tool when conversation history references tool calls but no tools are declared.
+- **Stream usage injection** — Automatically sets `stream_options.include_usage=true` on streaming requests so token usage data is returned in the SSE stream.
+- **Empty-stream retry** — If the upstream returns an empty stream, the proxy retries with exponential backoff (configurable via `STREAM_EMPTY_RETRY_MAX`). Client errors (4xx) are never retried.
+- **Finish-reason guard** — If the upstream stream ends without sending a `finish_reason`, the proxy synthesizes one to prevent clients from hanging.
+
+All other request fields are passed through to upstream unchanged.
 
 ## Known Limitations ⚠️
 
