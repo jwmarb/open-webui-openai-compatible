@@ -6,18 +6,19 @@ Run with real credentials:
 
 import json
 
-from .conftest import skip_without_real_instance
+import pytest
 
-pytestmark = skip_without_real_instance
+from .conftest import fetch_models_with_retry, skip_without_real_instance
+
+pytestmark = [skip_without_real_instance, pytest.mark.flaky(reruns=2, reruns_delay=5)]
 
 
 class TestAnthropicMessagesIntegration:
 
     def _first_claude_model(self, client) -> str:
-        resp = client.get("/v1/models")
-        models = resp.json()["data"]
-        claude_models = [m["id"] for m in models if "claude" in m["id"].lower() and ":" not in m["id"]]
-        assert len(claude_models) > 0, "No Claude models available for Anthropic test"
+        body = fetch_models_with_retry(client)
+        claude_models = [m["id"] for m in body["data"] if "claude" in m["id"].lower() and ":" not in m["id"]]
+        assert len(claude_models) > 0, "No Claude models available"
         return claude_models[0]
 
     def test_messages_non_streaming(self, client):

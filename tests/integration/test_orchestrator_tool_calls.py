@@ -14,9 +14,9 @@ import json
 import pytest
 from openai import OpenAI
 
-from .conftest import skip_without_real_instance
+from .conftest import fetch_models_with_retry, skip_without_real_instance
 
-pytestmark = skip_without_real_instance
+pytestmark = [skip_without_real_instance, pytest.mark.flaky(reruns=2, reruns_delay=5)]
 
 SUBAGENT_TOOLS = [
     {
@@ -124,8 +124,7 @@ def openai_client(client):
 
 @pytest.fixture
 def model_id(openai_client):
-    models = openai_client.models.list()
-    assert len(models.data) > 0, "No models available from upstream"
+    models = fetch_models_with_retry(openai_client)
     return models.data[0].id
 
 

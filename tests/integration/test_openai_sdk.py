@@ -12,9 +12,9 @@ import json
 import pytest
 from openai import OpenAI
 
-from .conftest import skip_without_real_instance
+from .conftest import fetch_models_with_retry, skip_without_real_instance
 
-pytestmark = skip_without_real_instance
+pytestmark = [skip_without_real_instance, pytest.mark.flaky(reruns=2, reruns_delay=5)]
 
 
 @pytest.fixture
@@ -28,15 +28,14 @@ def openai_client(client):
 
 @pytest.fixture
 def model_id(openai_client):
-    models = openai_client.models.list()
-    assert len(models.data) > 0, "No models available from upstream"
+    models = fetch_models_with_retry(openai_client)
     return models.data[0].id
 
 
 class TestModelsSDK:
 
     def test_list_models(self, openai_client):
-        models = openai_client.models.list()
+        models = fetch_models_with_retry(openai_client)
         assert len(models.data) > 0
         for m in models.data:
             assert m.id
@@ -159,7 +158,7 @@ class TestChatSDK:
 class TestThinkingVariantsSDK:
 
     def test_models_list_includes_thinking_variants(self, openai_client):
-        models = openai_client.models.list()
+        models = fetch_models_with_retry(openai_client)
         ids = [m.id for m in models.data]
         claude_base_ids = [i for i in ids if "claude" in i and ":" not in i]
         assert len(claude_base_ids) > 0, "No Claude models found"
@@ -167,7 +166,7 @@ class TestThinkingVariantsSDK:
             assert f"{base_id}:extended" in ids, f"Missing :extended variant for {base_id}"
 
     def test_extended_thinking_non_streaming(self, openai_client):
-        models = openai_client.models.list()
+        models = fetch_models_with_retry(openai_client)
         extended_ids = [m.id for m in models.data if m.id.endswith(":extended")]
         assert len(extended_ids) > 0
         model = extended_ids[0]
@@ -180,7 +179,7 @@ class TestThinkingVariantsSDK:
         assert resp.choices[0].finish_reason == "stop"
 
     def test_extended_thinking_streaming(self, openai_client):
-        models = openai_client.models.list()
+        models = fetch_models_with_retry(openai_client)
         extended_ids = [m.id for m in models.data if m.id.endswith(":extended")]
         assert len(extended_ids) > 0
         model = extended_ids[0]

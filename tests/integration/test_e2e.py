@@ -6,9 +6,11 @@ Run with real credentials:
 
 import json
 
-from .conftest import skip_without_real_instance
+import pytest
 
-pytestmark = skip_without_real_instance
+from .conftest import fetch_models_with_retry, skip_without_real_instance
+
+pytestmark = [skip_without_real_instance, pytest.mark.flaky(reruns=2, reruns_delay=5)]
 
 
 class TestHealthIntegration:
@@ -23,20 +25,18 @@ class TestModelsIntegration:
 
     def test_models_returns_openai_schema(self, client):
         """GET /v1/models should return translated OpenAI-compatible model list."""
-        resp = client.get("/v1/models")
-        assert resp.status_code == 200
-        body = resp.json()
+        body = fetch_models_with_retry(client)
 
         assert body["object"] == "list"
         assert isinstance(body["data"], list)
-        assert len(body["data"]) > 0, "Expected at least one model from upstream"
+        assert len(body["data"]) > 0
 
         for model in body["data"]:
             assert "id" in model
             assert model["object"] == "model"
             assert "created" in model
             assert "owned_by" in model
-            assert "urlIdx" not in model  # leak check: upstream raw field must not appear
+            assert "urlIdx" not in model
             assert "pipeline" not in model
             assert "tags" not in model
             assert "connection_type" not in model
@@ -46,11 +46,8 @@ class TestModelsIntegration:
 class TestChatCompletionsIntegration:
 
     def _first_model_id(self, client) -> str:
-        """Helper: fetch the first available model ID from /v1/models."""
-        resp = client.get("/v1/models")
-        models = resp.json()["data"]
-        assert len(models) > 0, "No models available for chat test"
-        return models[0]["id"]
+        body = fetch_models_with_retry(client)
+        return body["data"][0]["id"]
 
     def test_chat_non_streaming(self, client):
         """POST /v1/chat/completions (non-streaming) returns OpenAI-compatible response."""

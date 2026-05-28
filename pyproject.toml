@@ -20,6 +20,7 @@ dev = [
     "pyright",
     "pytest",
     "pytest-asyncio",
+    "pytest-rerunfailures",
     "openai",
     "textual",
 ]
@@ -38,3 +39,8 @@ select = ["E", "F", "W", "I", "UP"]
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that hit real upstream (may be flaky)",
+]
