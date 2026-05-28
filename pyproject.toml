@@ -12,7 +12,6 @@ dependencies = [
     "pydantic",
     "pydantic-settings",
     "python-dotenv",
-    "textual",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +21,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "openai",
+    "textual",
 ]
 
 [build-system]
