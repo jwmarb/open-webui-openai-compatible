@@ -38,7 +38,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ".[dev]"
-      - run: python -m pytest tests/test_translator.py tests/test_app.py -v
+      - run: python -m pytest tests/test_openai_translator.py tests/test_openai_routes.py tests/test_anthropic_translator.py tests/test_anthropic_routes.py -v
 
   integration-tests:
     runs-on: ubuntu-latest

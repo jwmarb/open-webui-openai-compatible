@@ -13,7 +13,7 @@ ruff check src/ tests/
 pyright src/
 
 # Unit tests (no credentials needed)
-python -m pytest tests/test_translator.py tests/test_app.py -v
+python -m pytest tests/test_openai_translator.py tests/test_openai_routes.py tests/test_anthropic_translator.py tests/test_anthropic_routes.py -v
 
 # Integration tests (requires real credentials exported BEFORE pytest starts)
 OPEN_WEBUI_URL=https://your-open-webui-instance.example.com USER_TOKEN=<jwt> python -m pytest tests/integration/ -v
@@ -30,20 +30,33 @@ docker compose up -d
 
 ```
 open-webui-openai-compatible/
-├── src/                  # All proxy source (flat, no sub-packages)
+├── src/                  # Proxy source with sub-packages
 │   ├── settings.py       # Pydantic Settings singleton — instantiated at import time
 │   ├── client.py         # Async httpx wrapper — used only for /v1/models
-│   ├── translator.py     # Model translation, body sanitization, thinking variants
-│   ├── models.py         # Pydantic response types (OpenAI schema shapes)
-│   └── main.py           # FastAPI app — 3 routes only
+│   ├── errors.py         # Shared error handling (OpenAI + Anthropic formats)
+│   ├── main.py           # FastAPI app — lifespan + /health + router includes
+│   ├── models.py         # Backward-compat re-export → src.proxy.openai.models
+│   ├── translator.py     # Backward-compat re-export → src.proxy.openai.translator
+│   └── proxy/
+│       ├── openai/
+│       │   ├── routes.py     # /v1/models, /v1/chat/completions handlers
+│       │   ├── translator.py # Model translation, body sanitization, thinking variants
+│       │   └── models.py     # Pydantic response types (OpenAI schema shapes)
+│       └── anthropic/
+│           ├── routes.py     # /v1/messages handler (streaming + non-streaming)
+│           ├── translator.py # Bidirectional Anthropic↔OpenAI translation
+│           └── models.py     # Pydantic types (Anthropic request/response)
 ├── tests/
 │   ├── conftest.py       # Module-level env defaults + autouse monkeypatch
-│   ├── test_translator.py
-│   ├── test_app.py       # MockAsyncOpenAI + MockWebClient, patches both
+│   ├── test_openai_translator.py
+│   ├── test_openai_routes.py
+│   ├── test_anthropic_translator.py
+│   ├── test_anthropic_routes.py
 │   └── integration/
 │       ├── conftest.py   # skip_without_real_instance marker + TestClient fixture
 │       ├── test_e2e.py
 │       ├── test_openai_sdk.py
+│       ├── test_anthropic_e2e.py
 │       ├── test_parallel_tool_calls.py
 │       └── test_orchestrator_tool_calls.py
 ├── tui.py                # Standalone Textual TUI client (NOT part of src/)
@@ -55,29 +68,41 @@ open-webui-openai-compatible/
 
 | Task | Location | Notes |
 |------|----------|-------|
-| Add/modify routes | `src/main.py` | Only 3 routes exist — no middleware |
-| Change Bedrock tool scrubbing | `_scrub_bedrock_tool_fields()` in `src/translator.py:141` | Runs before stream injection |
-| Change thinking budget | Constants at top of `src/translator.py` | `EXTENDED_THINKING_CONFIG`, `MIN_MAX_TOKENS_*` |
-| Add response model | `src/models.py` | Pydantic types matching OpenAI schema |
+| Add/modify OpenAI routes | `src/proxy/openai/routes.py` | `/v1/models`, `/v1/chat/completions` |
+| Add/modify Anthropic routes | `src/proxy/anthropic/routes.py` | `/v1/messages` |
+| Change Bedrock tool scrubbing | `_scrub_bedrock_tool_fields()` in `src/proxy/openai/translator.py` | Runs before stream injection |
+| Change thinking budget | Constants at top of `src/proxy/openai/translator.py` | `EXTENDED_THINKING_CONFIG`, `MIN_MAX_TOKENS_*` |
+| Add OpenAI response model | `src/proxy/openai/models.py` | Pydantic types matching OpenAI schema |
+| Add Anthropic model | `src/proxy/anthropic/models.py` | Pydantic types matching Anthropic schema |
+| Change Anthropic translation | `src/proxy/anthropic/translator.py` | Bidirectional Anthropic↔OpenAI |
 | Change upstream URLs | `src/client.py` | `/api/models` only; chat uses openai SDK |
 | Change env vars | `src/settings.py` | Then update `tests/conftest.py` defaults AND CI typecheck env |
-| Add SDK-known param | `_SDK_KNOWN_PARAMS` in `src/main.py:47` | Unlisted fields silently go to `extra_body` |
-| Change empty-stream retry | `_handle_streaming()` in `src/main.py:272` | Controlled by `settings.stream_empty_retry_max` |
-| Add unit test | `tests/test_app.py` | Use `MockAsyncOpenAI` pattern for chat, `MockWebClient` for models |
+| Add SDK-known param | `_SDK_KNOWN_PARAMS` in `src/proxy/openai/routes.py` | Unlisted fields silently go to `extra_body` |
+| Change empty-stream retry | `_handle_streaming()` in `src/proxy/openai/routes.py` | Controlled by `settings.stream_empty_retry_max` |
+| Change shared error handling | `src/errors.py` | Both OpenAI and Anthropic formats |
+| Add OpenAI unit test | `tests/test_openai_routes.py` | Use `MockAsyncOpenAI` pattern for chat, `MockWebClient` for models |
+| Add Anthropic unit test | `tests/test_anthropic_routes.py` | Same mock pattern |
 | Add integration test | `tests/integration/` | Needs real creds; uses `skip_without_real_instance` |
 | TUI changes | `tui.py` (root) | Talks to proxy, not upstream; not linted/typechecked in CI |
 
 ## Architecture
 
-Single-package FastAPI proxy. Source lives in `src/`, no sub-packages.
+Multi-package FastAPI proxy with sub-packages under `src/proxy/`.
 
 | Module | Role |
 |--------|------|
 | `src/settings.py` | Pydantic Settings singleton — **instantiated at import time** |
 | `src/client.py` | Async httpx wrapper; accepts `base_url` and `token` via constructor — **used only for `/v1/models`** |
-| `src/translator.py` | Model list translation, request body rewriting (Bedrock scrubbing + stream usage), Claude thinking variant logic |
-| `src/main.py` | FastAPI app with 3 routes: `/health`, `/v1/models`, `/v1/chat/completions` |
-| `src/models.py` | Pydantic response types (OpenAI schema shapes) — used by `translator.py` for validated serialization |
+| `src/errors.py` | Shared error handling — `classify_upstream_error`, `log_upstream_error`, `create_openai_error` |
+| `src/main.py` | FastAPI app with lifespan, `/health` route, and router includes |
+| `src/proxy/openai/translator.py` | Model list translation, request body rewriting (Bedrock scrubbing + stream usage), Claude thinking variant logic |
+| `src/proxy/openai/routes.py` | OpenAI route handlers: `/v1/models`, `/v1/chat/completions` |
+| `src/proxy/openai/models.py` | Pydantic types for OpenAI API shapes |
+| `src/proxy/anthropic/translator.py` | Bidirectional Anthropic↔OpenAI translation + streaming state machine |
+| `src/proxy/anthropic/routes.py` | Anthropic route handler: `POST /v1/messages` |
+| `src/proxy/anthropic/models.py` | Pydantic types for Anthropic API shapes |
+| `src/models.py` | Backward-compat re-export → `src.proxy.openai.models` |
+| `src/translator.py` | Backward-compat re-export → `src.proxy.openai.translator` |
 | `tui.py` | Standalone Textual TUI chat client — talks to the **proxy**, not upstream directly. Not part of the `src` package. |
 
 ### Code map
@@ -88,25 +113,30 @@ Single-package FastAPI proxy. Source lives in `src/`, no sub-packages.
 | `settings` | Singleton | `settings.py:36` | Module-level instance — import triggers validation |
 | `WebClient` | Class | `client.py:17` | httpx wrapper: `get_models()`, `aclose()` |
 | `app` | FastAPI | `main.py:204` | App instance with lifespan (creates/closes `WebClient` and `AsyncOpenAI`) |
-| `_SDK_KNOWN_PARAMS` | Const | `main.py:47` | Whitelist of fields routed to SDK kwargs; everything else → `extra_body` |
-| `_split_body_for_sdk` | Func | `main.py:59` | Separates SDK kwargs from `extra_body` based on `_SDK_KNOWN_PARAMS` |
-| `_classify_upstream_error` | Func | `main.py:75` | Maps exceptions → `(message, error_type, http_status)` |
-| `_stream_with_first` | Func | `main.py:141` | Yields SSE bytes for pre-read first chunk + rest; synthesizes `finish_reason` if missing |
-| `_handle_streaming` | Func | `main.py:272` | Streaming path: first-chunk pre-read, empty-stream retry, SSE serialization |
-| `_handle_non_streaming` | Func | `main.py:335` | Non-streaming path: direct SDK call, JSON response |
-| `health` | Route | `main.py:207` | `GET /health` |
-| `models` | Route | `main.py:212` | `GET /v1/models` → upstream `GET /api/models` |
-| `chat_completions` | Route | `main.py:238` | `POST /v1/chat/completions` → upstream `POST /api/chat/completions` |
-| `translate_models_response` | Func | `translator.py:109` | Raw upstream → OpenAI `ModelList` |
-| `rewrite_chat_body` | Func | `translator.py:183` | Bedrock tool scrubbing + stream usage injection |
-| `sanitize_chat_body` | Alias | `translator.py:190` | Alias for `rewrite_chat_body` (backward compat) |
-| `resolve_thinking_model` | Func | `translator.py:79` | Strip `:extended`/`:adaptive` suffix, return thinking config |
-| `apply_thinking_params` | Func | `translator.py:93` | Inject `thinking` param + ensure sufficient `max_tokens` |
-| `generate_thinking_variants` | Func | `translator.py:57` | Create virtual `:extended`/`:adaptive` model entries |
-| `create_openai_error` | Func | `translator.py:193` | Build OpenAI-format error JSON |
-| `OpenAIModel` / `OpenAIModelList` | Pydantic | `models.py:10,19` | Model list response types |
-| `ThinkingConfig` | Pydantic | `models.py:26` | `type` + `budget_tokens` |
-| `OpenAIErrorDetail` / `OpenAIErrorResponse` | Pydantic | `models.py:33,41` | `{"error": {"message", "type", "code"}}` |
+| `_SDK_KNOWN_PARAMS` | Const | `proxy/openai/routes.py` | Whitelist of fields routed to SDK kwargs; everything else → `extra_body` |
+| `_split_body_for_sdk` | Func | `proxy/openai/routes.py` | Separates SDK kwargs from `extra_body` based on `_SDK_KNOWN_PARAMS` |
+| `classify_upstream_error` | Func | `errors.py` | Maps exceptions → `(message, error_type, http_status)` |
+| `_stream_with_first` | Func | `proxy/openai/routes.py` | Yields SSE bytes for pre-read first chunk + rest; synthesizes `finish_reason` if missing |
+| `_handle_streaming` | Func | `proxy/openai/routes.py` | Streaming path: first-chunk pre-read, empty-stream retry, SSE serialization |
+| `_handle_non_streaming` | Func | `proxy/openai/routes.py` | Non-streaming path: direct SDK call, JSON response |
+| `health` | Route | `main.py` | `GET /health` |
+| `models` | Route | `proxy/openai/routes.py` | `GET /v1/models` → upstream `GET /api/models` |
+| `chat_completions` | Route | `proxy/openai/routes.py` | `POST /v1/chat/completions` → upstream `POST /api/chat/completions` |
+| `messages` | Route | `proxy/anthropic/routes.py` | `POST /v1/messages` → translate to OpenAI → upstream |
+| `translate_models_response` | Func | `proxy/openai/translator.py` | Raw upstream → OpenAI `ModelList` |
+| `rewrite_chat_body` | Func | `proxy/openai/translator.py` | Bedrock tool scrubbing + stream usage injection + chat_id |
+| `sanitize_chat_body` | Alias | `proxy/openai/translator.py` | Alias for `rewrite_chat_body` (backward compat) |
+| `resolve_thinking_model` | Func | `proxy/openai/translator.py` | Strip `:extended`/`:adaptive` suffix, return thinking config |
+| `apply_thinking_params` | Func | `proxy/openai/translator.py` | Inject `thinking` param + ensure sufficient `max_tokens` |
+| `generate_thinking_variants` | Func | `proxy/openai/translator.py` | Create virtual `:extended`/`:adaptive` model entries |
+| `create_openai_error` | Func | `errors.py` | Build OpenAI-format error JSON |
+| `translate_request` | Func | `proxy/anthropic/translator.py` | Anthropic request → OpenAI request body |
+| `translate_response` | Func | `proxy/anthropic/translator.py` | OpenAI response → Anthropic response |
+| `StreamingState` | Class | `proxy/anthropic/translator.py` | Stateful OpenAI chunk → Anthropic SSE event translation |
+| `create_anthropic_error` | Func | `proxy/anthropic/translator.py` | Build Anthropic-format error JSON |
+| `OpenAIModel` / `OpenAIModelList` | Pydantic | `proxy/openai/models.py` | Model list response types |
+| `ThinkingConfig` | Pydantic | `proxy/openai/models.py` | `type` + `budget_tokens` |
+| `OpenAIErrorDetail` / `OpenAIErrorResponse` | Pydantic | `proxy/openai/models.py` | `{"error": {"message", "type", "code"}}` |
 
 ### Request flow
 
@@ -167,14 +197,14 @@ The variant suffix is stripped before forwarding to upstream. The `thinking` par
 
 ## Testing
 
-- **Unit tests** (`tests/test_translator.py`, `tests/test_app.py`): Mock the `WebClient` via `unittest.mock.patch("src.main.WebClient")`. Use the custom `MockWebClient` class (not `AsyncMock`) — it has real async methods so `lifespan` can call `await aclose()`. Chat completions tests also mock `openai.AsyncOpenAI` via `patch("src.main.openai.AsyncOpenAI")` using `MockAsyncOpenAI` which supports `chat.completions.create()` and `close()`.
+- **Unit tests** (`tests/test_openai_translator.py`, `tests/test_openai_routes.py`): Mock the `WebClient` via `unittest.mock.patch("src.main.WebClient")`. Use the custom `MockWebClient` class (not `AsyncMock`) — it has real async methods so `lifespan` can call `await aclose()`. Chat completions tests also mock `openai.AsyncOpenAI` via `patch("src.main.openai.AsyncOpenAI")` using `MockAsyncOpenAI` which supports `chat.completions.create()` and `close()`.
 - **Dual-patch pattern**: Every unit test patches both `WebClient` and `AsyncOpenAI` via the `_patches()` helper — both must be patched even when testing only one route, because the FastAPI `lifespan` creates both clients at startup.
 - **Integration tests** (`tests/integration/`): Use real credentials. Skip automatically when env vars are test defaults. The skip guard reads from the already-instantiated `settings` singleton, not raw env vars.
 - **OpenAI SDK tests** (`tests/integration/test_openai_sdk.py`): Wire the OpenAI client through `TestClient` via `http_client=client` with `base_url="http://testserver/v1"`. Covers models, streaming, tool calls, and thinking variants.
 - **Parallel tool call tests** (`tests/integration/test_parallel_tool_calls.py`, `test_orchestrator_tool_calls.py`): Verify proxy doesn't drop/truncate parallel tool call deltas; stress test with 8-way parallel subagent roundtrips.
 - Integration tests need real env vars **exported before pytest starts** (not just in `.env`) because `os.environ.setdefault` in the root conftest won't overwrite pre-existing vars.
 - **Async generator mock pattern**: Tests use `yield  # noqa: F841` after `raise` to make async functions into generators. This is intentional — do not remove the `# noqa` comments.
-- **Settings-dependent tests** (e.g. `TestStreamEmptyRetry`): patch `src.main.settings` and set ALL attributes the route handler reads (not just the one under test), or you'll get `AttributeError`.
+- **Settings-dependent tests** (e.g. `TestStreamEmptyRetry`): patch `src.proxy.openai.routes.settings` and set ALL attributes the route handler reads (not just the one under test), or you'll get `AttributeError`.
 - **Captured kwargs pattern**: Tests asserting upstream params use `captured: dict = {}` closure in the mock handler, then assert on `captured["model"]`, `captured["extra_body"]`, etc.
 
 ## Conventions
@@ -213,8 +243,11 @@ The proxy does **not** use Open WebUI's `/v1/*` paths (those require API keys, n
 |-------------|--------------|------|
 | `GET /v1/models` | `GET /api/models` | Bearer JWT |
 | `POST /v1/chat/completions` | `POST /api/chat/completions` | Bearer JWT |
+| `POST /v1/messages` | `POST /api/chat/completions` | Bearer JWT |
 
 The `AsyncOpenAI` client's `base_url` is set to `{open_webui_url}/api` (not `/v1`) so the SDK's `/chat/completions` path maps correctly to `/api/chat/completions`.
+
+Two HTTP clients coexist: `WebClient` (raw httpx, models only) and `openai.AsyncOpenAI` (chat completions only). The split exists because models use Open WebUI's non-OpenAI JSON shape requiring raw httpx, while chat uses the OpenAI SDK's SSE streaming.
 
 Two HTTP clients coexist: `WebClient` (raw httpx, models only) and `openai.AsyncOpenAI` (chat completions only). The split exists because models use Open WebUI's non-OpenAI JSON shape requiring raw httpx, while chat uses the OpenAI SDK's SSE streaming.
 
@@ -224,7 +257,7 @@ GitHub Actions (`.github/workflows/ci.yml`): 4 jobs, all on Python 3.12.
 
 1. **lint** — `ruff check src/ tests/` (installs only `ruff`, not full package)
 2. **typecheck** — `pyright src/` (with dummy env vars — required because settings singleton fires at import time)
-3. **unit-tests** — `pytest tests/test_translator.py tests/test_app.py -v`
+3. **unit-tests** — `pytest tests/test_openai_translator.py tests/test_openai_routes.py tests/test_anthropic_translator.py tests/test_anthropic_routes.py -v`
 4. **integration-tests** — runs after lint+typecheck+unit pass; two-layer skip: job-level `if` blocks fork PRs, shell-level null check handles missing secrets
 
 `lint`, `typecheck`, and `unit-tests` run in parallel. `integration-tests` fans in after all three pass.
@@ -236,7 +269,7 @@ No Docker build/push, no pip caching, no deploy step — purely quality gates.
 - No hardcoded URLs anywhere in `src/` — all from `settings`.
 - Error responses must use OpenAI JSON format: `{"error": {"message", "type", "code"}}`.
 - Never expose `OPEN_WEBUI_URL` or `USER_TOKEN` values in error messages or logs.
-- Only 3 routes exist. No `/v1/models/{id}`, no embeddings, no CORS middleware.
+- Only 4 routes exist. No `/v1/models/{id}`, no embeddings, no CORS middleware.
 - `max_retries=0` on the `AsyncOpenAI` client — proxy handles retries itself. Do not raise above 0 or retries will double-fire.
 - `_SSE_HEADERS` must always be present on `StreamingResponse` — stripping them breaks streaming behind reverse proxies.
 - Do not remove the `# type: ignore[call-arg]` on `Settings()` (`settings.py:36`) — Pyright can't see pydantic-settings env injection.
