@@ -92,6 +92,7 @@ This builds the image from the provided Dockerfile and runs the proxy in detache
 | `/health` | GET | Health check |
 | `/v1/models` | GET | List available models (OpenAI-compatible) |
 | `/v1/chat/completions` | POST | Chat completions (supports streaming) |
+| `/v1/messages` | POST | Anthropic Messages API (supports streaming) |
 
 ### Curl Examples 📡
 
@@ -146,7 +147,7 @@ Unit tests run against mocked upstream responses — no real Open WebUI instance
 
 ```sh
 pip install ".[dev]"
-python -m pytest tests/test_translator.py tests/test_app.py -v
+python -m pytest tests/test_openai_translator.py tests/test_openai_routes.py tests/test_anthropic_translator.py tests/test_anthropic_routes.py -v
 ```
 
 ### Integration Tests
@@ -168,7 +169,7 @@ These tests verify:
 
 ```sh
 # Unit only (no credentials needed)
-python -m pytest tests/test_translator.py tests/test_app.py -v
+python -m pytest tests/test_openai_translator.py tests/test_openai_routes.py tests/test_anthropic_translator.py tests/test_anthropic_routes.py -v
 
 # Full suite (integration tests skip without real credentials)
 python -m pytest -v -rs
