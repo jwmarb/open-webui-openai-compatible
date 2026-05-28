@@ -10,6 +10,7 @@ import openai
 from fastapi import FastAPI
 
 from .client import WebClient
+from .proxy.anthropic.routes import router as anthropic_router
 from .proxy.openai.routes import router as openai_router
 from .settings import settings
 
@@ -44,6 +45,7 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(title="OpenAI-Compatible Proxy", lifespan=_lifespan)
 app.include_router(openai_router)
+app.include_router(anthropic_router)
 
 
 @app.get("/health")
