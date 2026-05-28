@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
@@ -12,6 +13,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ...errors import classify_upstream_error, log_upstream_error
+from ...settings import settings
 from ..openai.routes import _split_body_for_sdk
 from ..openai.translator import rewrite_chat_body
 from .translator import (
@@ -74,25 +76,58 @@ async def messages(request: Request) -> JSONResponse | StreamingResponse:
     return await _handle_non_streaming(ai_client, sdk_kwargs, extra, requested_model)
 
 
+_RETRY_BACKOFF_CAP: Final[int] = 120
+
+
 async def _handle_streaming(
     ai_client: openai.AsyncOpenAI,
     sdk_kwargs: dict[str, Any],
     extra: dict[str, Any],
     model: str,
 ) -> JSONResponse | StreamingResponse:
-    try:
-        stream = await ai_client.chat.completions.create(
-            **sdk_kwargs,
-            extra_body=extra or None,
-        )
-    except Exception as exc:
-        return _anthropic_error_response(exc, "Anthropic streaming create")
+    max_retries = settings.stream_empty_retry_max
+    attempt = 0
 
-    first_chunk: Any = None
-    try:
-        first_chunk = await stream.__anext__()  # type: ignore[union-attr]
-    except Exception as exc:
-        return _anthropic_error_response(exc, "Anthropic streaming first chunk")
+    while True:
+        try:
+            stream = await ai_client.chat.completions.create(
+                **sdk_kwargs,
+                extra_body=extra or None,
+            )
+        except Exception as exc:
+            return _anthropic_error_response(exc, "Anthropic streaming create")
+
+        first_chunk: Any = None
+        try:
+            first_chunk = await stream.__anext__()  # type: ignore[union-attr]
+        except Exception as exc:
+            if isinstance(exc, openai.APIStatusError) and 400 <= exc.status_code < 500:
+                return _anthropic_error_response(exc, "Anthropic streaming first chunk")
+            attempt += 1
+            if attempt <= max_retries:
+                sleep = min(1 << attempt, _RETRY_BACKOFF_CAP)
+                logger.warning(
+                    "Anthropic first-chunk error (attempt %d/%d): %s — retrying in %d seconds...",
+                    attempt, max_retries, exc, sleep,
+                )
+                await asyncio.sleep(sleep)
+                continue
+            if isinstance(exc, StopAsyncIteration):
+                logger.warning("Anthropic empty stream retries exhausted")
+                state = StreamingState(model=model)
+                final_events = state.finalize()
+
+                async def _empty_stream() -> AsyncGenerator[bytes, None]:
+                    for event in final_events:
+                        yield _sse_event(event["type"], event)
+
+                return StreamingResponse(
+                    _empty_stream(),
+                    media_type="text/event-stream",
+                    headers=_SSE_HEADERS,
+                )
+            return _anthropic_error_response(exc, "Anthropic streaming first chunk")
+        break
 
     async def _generate() -> AsyncGenerator[bytes, None]:
         state = StreamingState(model=model)
