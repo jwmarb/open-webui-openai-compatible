@@ -6,6 +6,7 @@ scrubbing, stream usage injection), and Claude thinking variant logic.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from .models import OpenAIErrorDetail, OpenAIErrorResponse, OpenAIModel, OpenAIModelList, ThinkingConfig
@@ -199,11 +200,36 @@ def _strip_unsupported_fields(body: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
+def _inject_chat_id(body: dict[str, Any]) -> dict[str, Any]:
+    """Inject a ``local:``-prefixed ephemeral chat_id.
+
+    Open WebUI 0.9.x requires a non-None ``chat_id`` string on
+    ``/api/chat/completions`` (``NoneType.startswith`` crash). The
+    ``local:`` prefix tells OWUI to skip all DB persistence — no
+    conversation rows, no ownership checks, no history lookup.
+    """
+    body["chat_id"] = f"local:{uuid.uuid4()}"
+    return body
+
+
+def _strip_session_id(body: dict[str, Any]) -> dict[str, Any]:
+    """Strip ``session_id`` to prevent OWUI multi-model fan-out.
+
+    When ``session_id`` is present, OWUI routes through its WebSocket
+    task pool (multi-model fan-out). The proxy has no WebSocket
+    connection — fan-out would hang or fail.
+    """
+    body.pop("session_id", None)
+    return body
+
+
 def rewrite_chat_body(body: dict[str, Any]) -> dict[str, Any]:
     rewritten = {**body}
     rewritten = _strip_unsupported_fields(rewritten)
     rewritten = _scrub_bedrock_tool_fields(rewritten)
     rewritten = _ensure_stream_usage(rewritten)
+    rewritten = _inject_chat_id(rewritten)
+    rewritten = _strip_session_id(rewritten)
     return rewritten
 
 

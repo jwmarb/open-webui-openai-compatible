@@ -139,7 +139,9 @@ class TestSanitizeChatBody:
         assert result["custom_llm_provider"] == "openai"
 
     def test_empty_body(self):
-        assert sanitize_chat_body({}) == {}
+        result = sanitize_chat_body({})
+        assert "chat_id" in result
+        assert result["chat_id"].startswith("local:")
 
     def test_preserves_most_openai_params(self):
         body = {
@@ -515,3 +517,46 @@ class TestStripUnsupportedFields:
 class TestRewriteChatBodyAlias:
     def test_sanitize_chat_body_is_alias_for_rewrite(self):
         assert sanitize_chat_body is rewrite_chat_body
+
+
+class TestChatIdInjection:
+    def test_injects_chat_id_with_local_prefix(self):
+        body = {"model": "m", "messages": []}
+        result = rewrite_chat_body(body)
+        assert "chat_id" in result
+        assert result["chat_id"].startswith("local:")
+
+    def test_chat_id_is_uuid_format(self):
+        import uuid
+        body = {"model": "m", "messages": []}
+        result = rewrite_chat_body(body)
+        suffix = result["chat_id"].removeprefix("local:")
+        uuid.UUID(suffix, version=4)
+
+    def test_each_call_produces_unique_chat_id(self):
+        body = {"model": "m", "messages": []}
+        r1 = rewrite_chat_body(body)
+        r2 = rewrite_chat_body(body)
+        assert r1["chat_id"] != r2["chat_id"]
+
+    def test_chat_id_not_in_original_body(self):
+        body = {"model": "m", "messages": []}
+        rewrite_chat_body(body)
+        assert "chat_id" not in body
+
+
+class TestSessionIdStripping:
+    def test_session_id_stripped(self):
+        body = {"model": "m", "messages": [], "session_id": "ws-123"}
+        result = rewrite_chat_body(body)
+        assert "session_id" not in result
+
+    def test_no_session_id_no_error(self):
+        body = {"model": "m", "messages": []}
+        result = rewrite_chat_body(body)
+        assert "session_id" not in result
+
+    def test_session_id_not_in_original_body(self):
+        body = {"model": "m", "messages": [], "session_id": "ws-123"}
+        rewrite_chat_body(body)
+        assert body["session_id"] == "ws-123"

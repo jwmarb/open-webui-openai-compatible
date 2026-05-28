@@ -497,7 +497,9 @@ class TestChatCompletionsEndpoint:
             with TestClient(app) as tc:
                 response = tc.post("/v1/chat/completions", json={})
                 assert response.status_code == 200
-                assert captured.get("extra_body") is None
+                extra = captured.get("extra_body")
+                assert isinstance(extra, dict)
+                assert extra.get("chat_id", "").startswith("local:")
 
 
 class TestModelsThinkingVariants:
