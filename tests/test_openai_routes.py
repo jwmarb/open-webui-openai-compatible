@@ -658,7 +658,7 @@ class TestStreamEmptyRetry:
             return real_gen()
 
         p_wc, p_oa = _patches(openai_handler=handler)
-        with p_wc, p_oa, patch("src.main.settings") as mock_settings:
+        with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 3
             mock_settings.log_level = "WARNING"
             with TestClient(app) as tc:
@@ -683,7 +683,7 @@ class TestStreamEmptyRetry:
             return empty_gen()
 
         p_wc, p_oa = _patches(openai_handler=handler)
-        with p_wc, p_oa, patch("src.main.settings") as mock_settings:
+        with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 2
             mock_settings.log_level = "WARNING"
             with TestClient(app) as tc:
@@ -710,7 +710,7 @@ class TestStreamEmptyRetry:
             return empty_gen()
 
         p_wc, p_oa = _patches(openai_handler=handler)
-        with p_wc, p_oa, patch("src.main.settings") as mock_settings:
+        with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 0
             mock_settings.log_level = "WARNING"
             with TestClient(app) as tc:
@@ -733,7 +733,7 @@ class TestStreamEmptyRetry:
             return real_gen()
 
         p_wc, p_oa = _patches(openai_handler=handler)
-        with p_wc, p_oa, patch("src.main.settings") as mock_settings:
+        with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 3
             mock_settings.log_level = "WARNING"
             with TestClient(app) as tc:
@@ -756,7 +756,7 @@ class TestStreamEmptyRetry:
             return error_gen()
 
         p_wc, p_oa = _patches(openai_handler=handler)
-        with p_wc, p_oa, patch("src.main.settings") as mock_settings:
+        with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 3
             mock_settings.log_level = "WARNING"
             with TestClient(app) as tc:
@@ -784,7 +784,7 @@ class TestStreamEmptyRetry:
             return error_gen()
 
         p_wc, p_oa = _patches(openai_handler=handler)
-        with p_wc, p_oa, patch("src.main.settings") as mock_settings:
+        with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 3
             mock_settings.log_level = "WARNING"
             with TestClient(app) as tc:
