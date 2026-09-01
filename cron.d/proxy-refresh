@@ -1,0 +1,2 @@
+# Refresh token check every 2 hours
+0 */2 * * * root python /app/playwright_login.py >> /var/log/proxy-refresh.log 2>&1

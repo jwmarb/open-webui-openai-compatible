@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import logging
+import os
+import subprocess
+import sys
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any, Final
 
 import httpx
@@ -14,6 +19,7 @@ import openai.types.chat
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ...auth import is_token_expired_or_invalid
 from ...errors import classify_upstream_error, create_openai_error, log_upstream_error
 from ...settings import settings
 from .translator import (
@@ -42,6 +48,9 @@ _SDK_KNOWN_PARAMS: Final[frozenset[str]] = frozenset({
 })
 
 _RETRY_BACKOFF_CAP: Final[int] = 120
+REFRESH_LOCK_PATH: Final[Path] = Path("/tmp/openwebui-proxy-refresh.lock")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_REFRESH_SCRIPT: Final[str] = str(PROJECT_ROOT / "playwright_login.py")
 
 router = APIRouter()
 
@@ -67,6 +76,80 @@ def _upstream_error_response(exc: Exception, context: str) -> JSONResponse:
     log_upstream_error(exc, context)
     msg, etype, code = classify_upstream_error(exc)
     return JSONResponse(content=create_openai_error(msg, etype, code), status_code=code)
+
+
+def _token_expired_error_response() -> JSONResponse:
+    """Build a 503 response indicating token expiry and refresh in progress."""
+    err = create_openai_error(
+        "Upstream authentication token expired. Token refresh initiated. Please retry your request.",
+        "server_error",
+        503,
+    )
+    return JSONResponse(content=err, status_code=503)
+
+
+_TOKEN_REJECTION_CODES = frozenset({"invalid_issuer", "invalid_token", "token_expired"})
+
+
+def _extract_error_code(body: object) -> str:
+    if not isinstance(body, dict):
+        return ""
+    code = body.get("code")
+    if isinstance(code, str):
+        return code
+    inner = body.get("error")
+    if isinstance(inner, dict):
+        inner_code = inner.get("code")
+        if isinstance(inner_code, str):
+            return inner_code
+    return ""
+
+
+def _should_refresh_token(token: str | None, body: object) -> bool:
+    """A 401 alone is ambiguous — refresh only on positive evidence the token is at fault.
+
+    Upstream returns 401 for non-token reasons too (revoked model access, rate policy),
+    and refreshing on those would spawn a browser login that cannot fix anything.
+    """
+    if is_token_expired_or_invalid(token):
+        return True
+    return _extract_error_code(body) in _TOKEN_REJECTION_CODES
+
+
+def _trigger_refresh() -> None:
+    """Spawn the refresh sidecar asynchronously, guarded by a lock file."""
+    try:
+        lock_fd = open(REFRESH_LOCK_PATH, "w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        logger.info("Token refresh already in progress (lock held), skipping")
+        return
+    except OSError as exc:
+        logger.error("Failed to acquire refresh lock: %s", exc)
+        return
+
+    def _release_lock(fd):
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+        REFRESH_LOCK_PATH.unlink(missing_ok=True)
+
+    try:
+        script_path = _REFRESH_SCRIPT
+        if not os.path.exists(script_path):
+            script_path = "playwright-login.py"
+        log_path = Path("/tmp/sidecar.log")
+        subprocess.Popen(
+            [sys.executable, script_path],
+            stdout=open(log_path, "a"),
+            stderr=open(log_path, "a"),
+            start_new_session=True,
+        )
+        logger.info("Token refresh sidecar spawned")
+    except Exception as exc:
+        logger.error("Failed to spawn refresh sidecar: %s", exc)
+        _release_lock(lock_fd)
+    else:
+        _release_lock(lock_fd)
 
 
 # ---------------------------------------------------------------------------
@@ -157,11 +240,22 @@ async def models(request: Request) -> JSONResponse:
         raw = await request.app.state.web_client.get_models()
         translated = translate_models_response(raw)
         logger.debug("GET /v1/models — returning %d models",
-                     len(translated.get("data", [])))
+                      len(translated.get("data", [])))
         return JSONResponse(content=translated)
     except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 401:
+            from ...auth import get_current_token
+
+            token = get_current_token()
+            try:
+                err_body = exc.response.json()
+            except Exception:
+                err_body = None
+            if _should_refresh_token(token, err_body):
+                _trigger_refresh()
+                return _token_expired_error_response()
         logger.error("GET /v1/models — upstream HTTP %s",
-                     exc.response.status_code)
+                      exc.response.status_code)
         err = create_openai_error(
             "Upstream request failed", "api_error", exc.response.status_code)
         return JSONResponse(content=err, status_code=exc.response.status_code)
@@ -221,6 +315,15 @@ async def _handle_streaming(
                 **sdk_kwargs,
                 extra_body=extra or None,
             )
+        except openai.APIStatusError as exc:
+            if exc.status_code == 401:
+                from ...auth import get_current_token
+
+                token = get_current_token()
+                if _should_refresh_token(token, getattr(exc, "body", None)):
+                    _trigger_refresh()
+                    return _token_expired_error_response()
+            return _upstream_error_response(exc, "Streaming create")
         except Exception as exc:
             return _upstream_error_response(exc, "Streaming create")
 
@@ -228,8 +331,27 @@ async def _handle_streaming(
         first_chunk: openai.types.chat.ChatCompletionChunk | None = None
         try:
             first_chunk = await stream.__anext__()  # type: ignore[union-attr]
+        except openai.APIStatusError as exc:
+            if exc.status_code == 401:
+                from ...auth import get_current_token
+
+                token = get_current_token()
+                if _should_refresh_token(token, getattr(exc, "body", None)):
+                    _trigger_refresh()
+                    return _token_expired_error_response()
+            if 400 <= exc.status_code < 500:
+                return _upstream_error_response(exc, "Streaming first chunk")
+            attempt += 1
+            if attempt <= max_retries:
+                sleep = min(1 << attempt, _RETRY_BACKOFF_CAP)
+                logger.warning(
+                    "First-chunk error (attempt %d/%d): %s — retrying in %d seconds...",
+                    attempt, max_retries, exc, sleep,
+                )
+                await asyncio.sleep(sleep)
+                continue
+            return _upstream_error_response(exc, "Streaming first chunk")
         except Exception as exc:
-            # Client errors (4xx) are non-retryable — the request itself is wrong.
             if isinstance(exc, openai.APIStatusError) and 400 <= exc.status_code < 500:
                 return _upstream_error_response(exc, "Streaming first chunk")
             attempt += 1
@@ -287,5 +409,14 @@ async def _handle_non_streaming(
             len(response_dict.get("choices", [])),
         )
         return JSONResponse(content=response_dict)
+    except openai.APIStatusError as exc:
+        if exc.status_code == 401:
+            from ...auth import get_current_token
+
+            token = get_current_token()
+            if _should_refresh_token(token, getattr(exc, "body", None)):
+                _trigger_refresh()
+                return _token_expired_error_response()
+        return _upstream_error_response(exc, "Non-streaming")
     except Exception as exc:
         return _upstream_error_response(exc, "Non-streaming")

@@ -9,6 +9,7 @@ import httpx
 import openai
 from fastapi import FastAPI
 
+from .auth import get_current_token
 from .client import WebClient
 from .proxy.anthropic.routes import router as anthropic_router
 from .proxy.openai.routes import router as openai_router
@@ -25,17 +26,32 @@ if not _pkg_logger.handlers:
 __all__ = ["app"]
 
 
+class _TokenAuth(httpx.Auth):
+    def auth_flow(self, request: httpx.Request):
+        token = get_current_token()
+        request.headers["Authorization"] = f"Bearer {token}"
+        yield request
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    app.state.web_client = WebClient(
-        settings.open_webui_url,
-        settings.user_token,
-        request_timeout=settings.request_timeout,
+    auth = _TokenAuth()
+    web_httpx_client = httpx.AsyncClient(
+        base_url=settings.open_webui_url,
+        timeout=httpx.Timeout(float(settings.request_timeout), connect=10.0),
+        auth=auth,
     )
-    app.state.openai_client = openai.AsyncOpenAI(
-        api_key=settings.user_token,
+    app.state.web_client = WebClient(client=web_httpx_client)
+
+    openai_httpx_client = httpx.AsyncClient(
         base_url=f"{settings.open_webui_url}/api",
         timeout=httpx.Timeout(float(settings.request_timeout), connect=10.0),
+        auth=auth,
+    )
+    app.state.openai_client = openai.AsyncOpenAI(
+        api_key="proxy-auth-via-hook",
+        base_url=f"{settings.open_webui_url}/api",
+        http_client=openai_httpx_client,
         max_retries=0,
     )
     yield

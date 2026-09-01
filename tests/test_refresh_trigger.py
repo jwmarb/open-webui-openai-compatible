@@ -1,0 +1,212 @@
+"""Tests for proxy refresh trigger logic — 401 detection, sidecar spawn, lock."""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import jwt
+import openai
+import pytest
+from fastapi.testclient import TestClient
+
+from src.proxy.openai.routes import _should_refresh_token
+
+
+def _make_jwt(exp_offset_seconds: int) -> str:
+    now = int(time.time())
+    payload = {"id": "test-user", "iat": now, "exp": now + exp_offset_seconds}
+    return jwt.encode(payload, "test-secret", algorithm="HS256")
+
+
+@pytest.fixture
+def token_file(tmp_path: Path) -> Path:
+    return tmp_path / "token.json"
+
+
+@pytest.fixture
+def mock_settings_env(monkeypatch: pytest.MonkeyPatch, token_file: Path):
+    monkeypatch.setenv("TOKEN_FILE", str(token_file))
+    monkeypatch.delenv("USER_TOKEN", raising=False)
+
+
+class MockAsyncOpenAI:
+    def __init__(self, handler=None):
+        self.chat = MagicMock()
+        self.chat.completions = MagicMock()
+        self.chat.completions.create = handler or AsyncMock()
+
+    async def close(self):
+        pass
+
+
+class MockWebClient:
+    def __init__(self, *_args, get_models=None, **_kwargs):
+        self._get_models = get_models
+
+    async def get_models(self):
+        return await self._get_models() if self._get_models else {"data": []}
+
+    async def aclose(self):
+        pass
+
+
+@pytest.fixture
+def _setup_token(token_file: Path):
+    def _set(token: str, expires_at: int | None = None):
+        data = {"token": token}
+        if expires_at is not None:
+            data["expires_at"] = expires_at
+        token_file.write_text(json.dumps(data))
+    return _set
+
+
+class TestRefreshTriggerOn401:
+    """Tests for proxy behavior when upstream returns 401."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, mock_settings_env: None, _setup_token):
+        _setup_token("test-token", int(time.time()) + 3600)
+
+    def test_returns_503_and_spawns_sidecar_on_401_with_expired_token(self, _setup_token):
+        """Upstream 401 + expired token → 503 + sidecar spawn."""
+        expired_token = _make_jwt(exp_offset_seconds=-3600)
+        _setup_token(expired_token, int(time.time()) - 3600)
+
+        async def mock_create(**kwargs):
+            raise openai.APIStatusError(
+                message="Unauthorized",
+                response=MagicMock(status_code=401),
+                body=None,
+            )
+
+        wc = MockWebClient()
+        oa = MockAsyncOpenAI(handler=mock_create)
+
+        with (
+            patch("src.main.WebClient", return_value=wc),
+            patch("src.main.openai.AsyncOpenAI", return_value=oa),
+            patch("src.proxy.openai.routes._trigger_refresh") as mock_trigger,
+        ):
+            from src.main import app
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/v1/chat/completions",
+                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                )
+
+            assert resp.status_code == 503
+            error = resp.json()["error"]
+            assert "expired" in error["message"].lower() or "refresh" in error["message"].lower()
+            mock_trigger.assert_called_once()
+
+    def test_returns_401_without_spawning_when_token_not_expired(self, _setup_token):
+        """Upstream 401 but token fresh → pass through 401, no refresh."""
+        fresh_token = _make_jwt(exp_offset_seconds=3600)
+        _setup_token(fresh_token, int(time.time()) + 3600)
+
+        async def mock_create(**kwargs):
+            raise openai.APIStatusError(
+                message="Unauthorized",
+                response=MagicMock(status_code=401),
+                body=None,
+            )
+
+        wc = MockWebClient()
+        oa = MockAsyncOpenAI(handler=mock_create)
+
+        with (
+            patch("src.main.WebClient", return_value=wc),
+            patch("src.main.openai.AsyncOpenAI", return_value=oa),
+            patch("src.proxy.openai.routes._trigger_refresh") as mock_trigger,
+        ):
+            from src.main import app
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/v1/chat/completions",
+                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                )
+
+            assert resp.status_code == 401
+            mock_trigger.assert_not_called()
+
+    def test_non_streaming_returns_503_on_401_expired_token(self, _setup_token):
+        """Non-streaming endpoint also triggers refresh on 401+expired."""
+        expired_token = _make_jwt(exp_offset_seconds=-3600)
+        _setup_token(expired_token, int(time.time()) - 3600)
+
+        async def mock_create(**kwargs):
+            raise openai.APIStatusError(
+                message="Unauthorized",
+                response=MagicMock(status_code=401),
+                body=None,
+            )
+
+        wc = MockWebClient()
+        oa = MockAsyncOpenAI(handler=mock_create)
+
+        with (
+            patch("src.main.WebClient", return_value=wc),
+            patch("src.main.openai.AsyncOpenAI", return_value=oa),
+            patch("src.proxy.openai.routes._trigger_refresh") as mock_trigger,
+        ):
+            from src.main import app
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/v1/chat/completions",
+                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+                )
+
+            assert resp.status_code == 503
+            mock_trigger.assert_called_once()
+
+
+class TestRefreshLock:
+    """Tests for the refresh lock file mechanism."""
+
+    def test_lock_file_path_exists(self):
+        from src.proxy.openai.routes import REFRESH_LOCK_PATH
+        assert REFRESH_LOCK_PATH is not None
+
+    def test_trigger_refresh_runs_sidecar(self, tmp_path: Path):
+        lock_path = tmp_path / "test-lock.lock"
+        sidecar_called = False
+
+        def fake_popen(*args, **kwargs):
+            nonlocal sidecar_called
+            sidecar_called = True
+
+        with patch("src.proxy.openai.routes.REFRESH_LOCK_PATH", lock_path):
+            with patch("subprocess.Popen", fake_popen):
+                from src.proxy.openai.routes import _trigger_refresh
+                _trigger_refresh()
+                assert sidecar_called
+                assert lock_path.exists() is False
+
+
+class TestShouldRefreshToken:
+    """A 401 must only trigger refresh on positive evidence the token is at fault."""
+
+    def test_true_when_token_expired(self):
+        assert _should_refresh_token(_make_jwt(exp_offset_seconds=-3600), None) is True
+
+    def test_false_when_token_fresh_and_no_body(self):
+        assert _should_refresh_token(_make_jwt(exp_offset_seconds=3600), None) is False
+
+    def test_true_on_invalid_issuer_even_when_token_looks_fresh(self):
+        fresh = _make_jwt(exp_offset_seconds=3600)
+        assert _should_refresh_token(fresh, {"code": "invalid_issuer"}) is True
+
+    def test_true_on_nested_error_code(self):
+        fresh = _make_jwt(exp_offset_seconds=3600)
+        assert _should_refresh_token(fresh, {"error": {"code": "invalid_token"}}) is True
+
+    def test_false_on_unrelated_401_code(self):
+        fresh = _make_jwt(exp_offset_seconds=3600)
+        assert _should_refresh_token(fresh, {"code": "model_access_denied"}) is False
+
+    def test_false_on_non_dict_body(self):
+        fresh = _make_jwt(exp_offset_seconds=3600)
+        assert _should_refresh_token(fresh, "upstream said no") is False

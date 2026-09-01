@@ -1,6 +1,6 @@
 """Application settings loaded from environment variables or .env file."""
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__ = ["Settings", "settings"]
@@ -11,7 +11,9 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8")
 
     open_webui_url: str
-    user_token: str
+    user_token: str | None = None
+    ua_netid: str | None = None
+    ua_netid_password: SecretStr | None = None
     port: int = Field(default=8000, ge=1, le=65535)
     request_timeout: int = Field(default=300, ge=10, le=3600)
     stream_empty_retry_max: int = Field(default=3, ge=0, le=10)
@@ -32,5 +34,5 @@ class Settings(BaseSettings):
         return value.rstrip("/")
 
 
-# type: ignore[call-arg]  # pydantic-settings injects from env
-settings = Settings()
+# pydantic-settings injects these from the environment; Pyright cannot see that.
+settings = Settings()  # type: ignore[call-arg]

@@ -41,7 +41,10 @@ Clients speak OpenAI's API format. The proxy translates those requests to Open W
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `OPEN_WEBUI_URL` | Yes | — | Base URL of your Open WebUI instance |
-| `USER_TOKEN` | Yes | — | JWT token obtained from logging into Open WebUI |
+| `USER_TOKEN` | No | — | JWT from Open WebUI. Used as a fallback when no token file exists; optional if automatic renewal is configured |
+| `UA_NETID` | No | — | NetID for automatic browser login (renewal only) |
+| `UA_NETID_PASSWORD` | No | — | NetID password for automatic browser login (renewal only) |
+| `TOKEN_FILE` | No | `~/.config/open-webui-proxy/token.json` | Path to the renewed-token file, preferred over `USER_TOKEN` |
 | `PORT` | No | `8000` | Port the proxy server listens on |
 | `REQUEST_TIMEOUT` | No | `300` | Upstream request timeout in seconds (10–3600) |
 | `STREAM_EMPTY_RETRY_MAX` | No | `3` | Max retries for empty upstream streams (0–10) |
@@ -207,8 +210,7 @@ All other request fields are passed through to upstream unchanged.
 
 ## Known Limitations ⚠️
 
-- **JWT token expiry** — Tokens from Open WebUI may expire after a period of time. You'll need to log in again and update `.env` manually.
-- **No automatic token refresh** — The proxy has no mechanism to renew expired tokens.
+- **Renewal depends on a persisted browser session** — Automatic renewal reuses the Shibboleth SSO session stored in the sidecar's browser profile, so it normally needs no interaction. If that session and the Duo "trusted browser" cookie both lapse, the next renewal requires approving a Duo Push on your phone. Deleting the browser profile forces a full interactive login.
 - **No individual model lookup** — Only `/v1/models` (list all) is supported. There is no `/v1/models/{id}` endpoint.
 - **No embeddings, audio, or image endpoints** — The proxy only covers `/v1/models` and `/v1/chat/completions`. All other OpenAI API endpoints are unavailable.
 

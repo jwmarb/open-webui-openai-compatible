@@ -12,6 +12,7 @@ dependencies = [
     "pydantic",
     "pydantic-settings",
     "python-dotenv",
+    "PyJWT",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +24,7 @@ dev = [
     "pytest-rerunfailures",
     "openai",
     "textual",
+    "playwright",
 ]
 
 [build-system]

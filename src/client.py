@@ -17,12 +17,23 @@ __all__ = ["WebClient"]
 class WebClient:
     """Async HTTP client for Open WebUI's model listing endpoint."""
 
-    def __init__(self, base_url: str, token: str, *, request_timeout: int = 300) -> None:
-        self._client = httpx.AsyncClient(
-            base_url=base_url,
-            timeout=httpx.Timeout(float(request_timeout), connect=10.0),
-            headers={"Authorization": f"Bearer {token}"},
-        )
+    def __init__(
+        self,
+        base_url: str | None = None,
+        token: str | None = None,
+        *,
+        client: httpx.AsyncClient | None = None,
+        request_timeout: int = 300,
+    ) -> None:
+        if client is not None:
+            self._client = client
+        else:
+            assert base_url is not None and token is not None
+            self._client = httpx.AsyncClient(
+                base_url=base_url,
+                timeout=httpx.Timeout(float(request_timeout), connect=10.0),
+                headers={"Authorization": f"Bearer {token}"},
+            )
 
     async def get_models(self) -> dict[str, Any]:
         logger.debug("GET /api/models → %s", self._client.base_url)
