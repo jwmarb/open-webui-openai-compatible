@@ -45,16 +45,28 @@ _TRUST_SELECTORS = (
 )
 
 
+def _any_locator(page, selectors: tuple[str, ...]):
+    """Build one locator matching any of the selectors.
+
+    Comma-joining these into a single selector string does not work: Playwright cannot
+    parse a list that mixes engines (`text="..."` with `:has-text(...)`), and commas
+    inside the quoted text break the grammar. `or_()` is the supported way to race them.
+    """
+    loc = page.locator(selectors[0])
+    for selector in selectors[1:]:
+        loc = loc.or_(page.locator(selector))
+    return loc
+
+
 def _click_first(page, selectors: tuple[str, ...], timeout: int = 0) -> str | None:
     """Click the first matching selector.
 
-    A non-zero timeout is spent once on the whole group (selectors are raced via a single
-    comma-joined wait), not per selector — waiting serially would multiply the timeout by
-    the number of selectors whenever none of them is present.
+    A non-zero timeout is spent once on the whole group, not per selector — waiting
+    serially would multiply the timeout by the number of selectors when none match.
     """
     if timeout:
         try:
-            page.wait_for_selector(",".join(selectors), timeout=timeout, state="visible")
+            _any_locator(page, selectors).first.wait_for(timeout=timeout, state="visible")
         except Exception:
             return None
     for selector in selectors:
@@ -173,6 +185,15 @@ def _run_with_lock(_lock_fd: int) -> bool:
             page = browser.pages[0] if browser.pages else browser.new_page()
 
             page.goto(url, wait_until="networkidle", timeout=60000)
+            # Open WebUI is a client-rendered SPA that redirects to /auth after load, so
+            # networkidle alone does not mean the SSO button exists yet. Wait for either
+            # landmark before probing; a cold browser profile is markedly slower.
+            try:
+                _any_locator(page, (*_SSO_SELECTORS, "#username")).first.wait_for(
+                    timeout=30000, state="visible"
+                )
+            except Exception:
+                logger.info("No SSO button or login form appeared; may already be signed in")
             logger.info("Landed at: %s", page.url)
 
             cookies = page.context.cookies([url])

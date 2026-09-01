@@ -1,9 +1,33 @@
-version: "3.8"
-
 services:
   proxy:
-    build: .
-    env_file: .env
+    build:
+      context: .
+      dockerfile: Dockerfile.playwright
+    image: open-webui-openai-compatible:latest
+    env_file:
+      # required:false lets `docker compose up` reach the entrypoint's credential
+      # check, which prints setup instructions, instead of failing on a missing file.
+      - path: .env
+        required: false
+    environment:
+      TOKEN_FILE: /data/token.json
+      BROWSER_PROFILE_DIR: /data/browser-profile
     ports:
       - "${PORT:-8000}:${PORT:-8000}"
-    restart: unless-stopped
+    volumes:
+      # Persists the JWT and the browser profile. The profile holds the Shibboleth
+      # session and Duo trusted-browser cookie, so keeping it across restarts is what
+      # prevents a Duo prompt on every renewal.
+      - proxy-data:/data
+    # on-failure (not unless-stopped) so a misconfiguration stops after a few tries
+    # instead of looping forever; the entrypoint's setup message stays readable.
+    restart: on-failure:3
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:${PORT:-8000}/health',timeout=5).status==200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      start_period: 180s
+      retries: 3
+
+volumes:
+  proxy-data:
