@@ -10,6 +10,11 @@ TEST_DEFAULT_PORT = "8000"
 TEST_DEFAULT_REQUEST_TIMEOUT = "300"
 TEST_DEFAULT_LOG_LEVEL = "WARNING"
 
+# Point TOKEN_FILE at a path that cannot exist so get_current_token() falls back to
+# USER_TOKEN. Without this, unit tests read the developer's real ~/.config token and
+# results change depending on whether that token happens to be expired.
+TEST_TOKEN_FILE = "/nonexistent/open-webui-proxy-test/token.json"
+
 # Set env vars at module level BEFORE any src imports.
 # This prevents pydantic-settings from raising ValidationError during test collection
 # when src/settings.py executes `settings = Settings()` at import time.
@@ -18,6 +23,7 @@ os.environ.setdefault("USER_TOKEN", TEST_DEFAULT_TOKEN)
 os.environ.setdefault("PORT", TEST_DEFAULT_PORT)
 os.environ.setdefault("REQUEST_TIMEOUT", TEST_DEFAULT_REQUEST_TIMEOUT)
 os.environ.setdefault("LOG_LEVEL", TEST_DEFAULT_LOG_LEVEL)
+os.environ.setdefault("TOKEN_FILE", TEST_TOKEN_FILE)
 
 
 @pytest.fixture(autouse=True)
@@ -28,3 +34,4 @@ def mock_settings(monkeypatch):
     monkeypatch.setenv("PORT", TEST_DEFAULT_PORT)
     monkeypatch.setenv("REQUEST_TIMEOUT", TEST_DEFAULT_REQUEST_TIMEOUT)
     monkeypatch.setenv("LOG_LEVEL", TEST_DEFAULT_LOG_LEVEL)
+    monkeypatch.setenv("TOKEN_FILE", TEST_TOKEN_FILE)
