@@ -13,13 +13,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml .
 RUN pip install --no-cache-dir . playwright PyJWT
 
-# Chromium must be installed for the same user that later runs it, so the browser
-# lives under the app user's home rather than root's.
+# Install browsers at a fixed absolute path rather than the installer's $HOME.
+# A HOME-relative path only resolves for the user that installed it, so the same
+# image breaks if run under a different user (e.g. compose `user: 1000:1000` to
+# keep /data files host-owned) — Playwright then looks in that user's home, finds
+# nothing, and login crashes.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+
+# Chromium is installed as appuser; /opt/ms-playwright is pre-created and
+# world-readable so any runtime user can launch it.
 RUN useradd --create-home --uid 10001 appuser && \
-    mkdir -p /data && chown -R appuser:appuser /data /app
+    mkdir -p /data /opt/ms-playwright && \
+    chown -R appuser:appuser /data /app /opt/ms-playwright
 USER appuser
 
-RUN playwright install chromium
+RUN playwright install chromium && chmod -R a+rX /opt/ms-playwright
 
 COPY --chown=appuser:appuser src/ src/
 COPY --chown=appuser:appuser playwright_login.py .
