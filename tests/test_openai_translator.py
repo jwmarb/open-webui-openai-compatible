@@ -1,7 +1,5 @@
 from src.models import OpenAIModel, ThinkingConfig
 from src.translator import (
-    ADAPTIVE_THINKING_CONFIG,
-    EXTENDED_THINKING_CONFIG,
     apply_thinking_params,
     create_openai_error,
     generate_thinking_variants,
@@ -61,7 +59,7 @@ class TestTranslateModelsResponse:
         assert "gpt-4" in ids
         assert "claude-3" in ids
         assert "claude-3:extended" in ids
-        assert "claude-3:adaptive" in ids
+        assert "claude-3:adaptive" not in ids
         assert "mistral-7b" in ids
         assert result["data"][0]["id"] == "gpt-4"
 
@@ -197,6 +195,46 @@ class TestSanitizeChatBody:
         assert "function_call" not in result
 
 
+class TestStripIncompatibleThinking:
+    def test_strips_thinking_for_openai_model(self):
+        body = {
+            "model": "openai.gpt-5.6-luna",
+            "messages": [],
+            "thinking": {"type": "enabled", "budget_tokens": 10000},
+        }
+        result = rewrite_chat_body(body)
+        assert "thinking" not in result
+
+    def test_preserves_thinking_for_claude_model(self):
+        body = {
+            "model": "anthropic.claude-sonnet-4-6",
+            "messages": [],
+            "thinking": {"type": "enabled", "budget_tokens": 10000},
+        }
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+
+    def test_strips_thinking_for_unknown_model(self):
+        body = {"model": "meta.llama3", "messages": [], "thinking": {"type": "enabled"}}
+        result = rewrite_chat_body(body)
+        assert "thinking" not in result
+
+    def test_preserves_reasoning_effort_for_openai_model(self):
+        body = {"model": "openai.gpt-5.6-luna", "messages": [], "reasoning_effort": "high"}
+        result = rewrite_chat_body(body)
+        assert result["reasoning_effort"] == "high"
+
+    def test_does_not_mutate_original(self):
+        body = {"model": "gpt-4o", "messages": [], "thinking": {"type": "enabled"}}
+        rewrite_chat_body(body)
+        assert body["thinking"] == {"type": "enabled"}
+
+    def test_noop_when_thinking_absent(self):
+        body = {"model": "openai.gpt-5.6-luna", "messages": []}
+        result = rewrite_chat_body(body)
+        assert "thinking" not in result
+
+
 class TestGenerateThinkingVariants:
     def test_non_claude_model_no_variants(self):
         model = OpenAIModel(id="gpt-4", owned_by="OpenAI")
@@ -208,11 +246,17 @@ class TestGenerateThinkingVariants:
         ids = [v.id for v in variants]
         assert ids == ["bedrock-claude-4-6-opus:extended", "bedrock-claude-4-6-opus:adaptive"]
 
-    def test_claude_sonnet_gets_extended_and_adaptive(self):
+    def test_claude_4_6_sonnet_gets_extended_and_adaptive(self):
+        model = OpenAIModel(id="bedrock-claude-4-6-sonnet")
+        variants = generate_thinking_variants(model)
+        ids = [v.id for v in variants]
+        assert ids == ["bedrock-claude-4-6-sonnet:extended", "bedrock-claude-4-6-sonnet:adaptive"]
+
+    def test_claude_4_5_sonnet_gets_extended_only(self):
         model = OpenAIModel(id="bedrock-claude-4-5-sonnet")
         variants = generate_thinking_variants(model)
         ids = [v.id for v in variants]
-        assert ids == ["bedrock-claude-4-5-sonnet:extended", "bedrock-claude-4-5-sonnet:adaptive"]
+        assert ids == ["bedrock-claude-4-5-sonnet:extended"]
 
     def test_claude_haiku_gets_extended_only(self):
         model = OpenAIModel(id="bedrock-claude-4-5-haiku")
@@ -258,8 +302,8 @@ class TestResolveThinkingModel:
         assert config.budget_tokens == 32000
 
     def test_adaptive_suffix_stripped(self):
-        base, config = resolve_thinking_model("bedrock-claude-4-5-sonnet:adaptive")
-        assert base == "bedrock-claude-4-5-sonnet"
+        base, config = resolve_thinking_model("bedrock-claude-4-6-sonnet:adaptive")
+        assert base == "bedrock-claude-4-6-sonnet"
         assert config == ThinkingConfig(type="adaptive")
 
     def test_haiku_extended_gets_smaller_budget(self):
@@ -273,15 +317,25 @@ class TestResolveThinkingModel:
         assert base == "some-model:v2"
         assert config is None
 
-    def test_non_claude_extended_suffix_still_resolves(self):
+    def test_non_claude_extended_suffix_yields_no_thinking(self):
         base, config = resolve_thinking_model("gpt-4:extended")
         assert base == "gpt-4"
-        assert config == EXTENDED_THINKING_CONFIG
+        assert config is None
 
-    def test_non_claude_adaptive_suffix_still_resolves(self):
+    def test_non_claude_adaptive_suffix_yields_no_thinking(self):
         base, config = resolve_thinking_model("gpt-4:adaptive")
         assert base == "gpt-4"
-        assert config == ADAPTIVE_THINKING_CONFIG
+        assert config is None
+
+    def test_openai_model_extended_suffix_yields_no_thinking(self):
+        base, config = resolve_thinking_model("openai.gpt-5.6-luna:extended")
+        assert base == "openai.gpt-5.6-luna"
+        assert config is None
+
+    def test_claude_4_5_adaptive_suffix_yields_no_thinking(self):
+        base, config = resolve_thinking_model("bedrock-claude-4-5-sonnet:adaptive")
+        assert base == "bedrock-claude-4-5-sonnet"
+        assert config is None
 
 
 class TestApplyThinkingParams:

@@ -130,6 +130,56 @@ def _patches(*, openai_handler=None):
     )
 
 
+class TestMessagesThinkingGate:
+    """The ``thinking`` strip lives in rewrite_chat_body, which /v1/messages also calls."""
+
+    def test_strips_client_thinking_for_non_anthropic_model(self):
+        captured: dict = {}
+
+        async def handler(**kwargs):
+            captured.update(kwargs)
+            return _completion()
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/messages",
+                    json={
+                        "model": "openai.gpt-5.6-luna",
+                        "max_tokens": 1024,
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "thinking": {"type": "enabled", "budget_tokens": 10000},
+                    },
+                )
+                assert response.status_code == 200
+                assert captured["model"] == "openai.gpt-5.6-luna"
+                assert "thinking" not in (captured.get("extra_body") or {})
+
+    def test_preserves_client_thinking_for_claude_model(self):
+        captured: dict = {}
+
+        async def handler(**kwargs):
+            captured.update(kwargs)
+            return _completion()
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/messages",
+                    json={
+                        "model": "anthropic.claude-sonnet-4-6",
+                        "max_tokens": 1024,
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "thinking": {"type": "enabled", "budget_tokens": 10000},
+                    },
+                )
+                assert response.status_code == 200
+                extra = captured.get("extra_body") or {}
+                assert extra["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+
+
 class TestMessagesNonStreaming:
     def test_basic_text_response(self):
         async def handler(**kwargs):

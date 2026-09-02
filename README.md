@@ -138,9 +138,11 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 ```
 
 **Notes:**
-- `:extended` is available for all Claude models. Haiku gets a smaller budget (16k tokens vs 32k).
-- `:adaptive` is available for Sonnet and Opus but **not** Haiku.
+- `:extended` is available for all Anthropic-family models. Haiku gets a smaller budget (16k tokens vs 32k).
+- `:adaptive` requires Opus/Sonnet 4.6 or newer (or a `fable`/`mythos` model). Claude 4.5 and earlier — including Haiku — accept only `thinking.type=enabled` and reject adaptive upstream, so the variant is not offered for them.
 - The proxy automatically sets `max_tokens` high enough for thinking to work (64k standard, 32k for Haiku).
+- The `thinking` parameter is Anthropic-only. If you send it for a non-Anthropic model (e.g. a GPT model), the proxy strips it and logs a warning — without this, the provider rejects the request with `400 unknown_parameter: 'thinking'`.
+- To control reasoning depth on OpenAI reasoning models, send the standard `reasoning_effort` string (`low`/`medium`/`high`, plus `xhigh` and `none` on newer models). The proxy passes it through untouched, and Open WebUI supports it natively. Note that valid values are model-dependent — `minimal` is rejected by GPT-5.5 and GPT-5.6, and non-reasoning models such as `gpt-4o` reject the parameter entirely.
 
 ## Testing 🧪
 

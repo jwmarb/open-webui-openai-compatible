@@ -447,16 +447,60 @@ class TestChatCompletionsEndpoint:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={
-                        "model": "bedrock-claude-4-5-sonnet:adaptive",
+                        "model": "bedrock-claude-4-6-sonnet:adaptive",
                         "messages": [{"role": "user", "content": "Hi"}],
                     },
                 )
                 assert response.status_code == 200
-                assert captured["model"] == "bedrock-claude-4-5-sonnet"
+                assert captured["model"] == "bedrock-claude-4-6-sonnet"
                 extra = captured.get("extra_body", {})
                 assert extra["thinking"]["type"] == "adaptive"
                 assert "budget_tokens" not in extra["thinking"]
                 assert captured["max_tokens"] >= 64000
+
+    def test_chat_strips_client_thinking_for_openai_model(self):
+        captured: dict = {}
+
+        async def handler(**kwargs):
+            captured.update(kwargs)
+            return _completion()
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "openai.gpt-5.6-luna",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "thinking": {"type": "enabled", "budget_tokens": 10000},
+                    },
+                )
+                assert response.status_code == 200
+                assert captured["model"] == "openai.gpt-5.6-luna"
+                assert "thinking" not in (captured.get("extra_body") or {})
+
+    def test_chat_preserves_client_thinking_for_claude_model(self):
+        captured: dict = {}
+
+        async def handler(**kwargs):
+            captured.update(kwargs)
+            return _completion()
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "anthropic.claude-sonnet-4-6",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "thinking": {"type": "enabled", "budget_tokens": 10000},
+                    },
+                )
+                assert response.status_code == 200
+                extra = captured.get("extra_body") or {}
+                assert extra["thinking"] == {"type": "enabled", "budget_tokens": 10000}
 
     def test_chat_passes_extra_fields_through(self):
         captured: dict = {}

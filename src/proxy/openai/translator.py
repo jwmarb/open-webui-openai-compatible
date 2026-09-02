@@ -6,10 +6,14 @@ scrubbing, stream usage injection), and Claude thinking variant logic.
 
 from __future__ import annotations
 
+import logging
+import re
 import uuid
 from typing import Any
 
 from .models import OpenAIModel, OpenAIModelList, ThinkingConfig
+
+logger = logging.getLogger(__name__)
 
 THINKING_SUFFIX_EXTENDED = ":extended"
 THINKING_SUFFIX_ADAPTIVE = ":adaptive"
@@ -40,18 +44,69 @@ __all__ = [
 ]
 
 
+def _normalize_model_id(model_id: str) -> str:
+    """Lowercase and unify separators so ``anthropic.claude-x`` and ``bedrock_claude_x`` agree."""
+    base, _ = _split_thinking_suffix(model_id)
+    return re.sub(r"[._/]", "-", base.lower())
+
+
+# Open WebUI's GET /api/models returns the raw upstream entry (id/object/created/
+# owned_by) with no capability metadata, so ID matching is the only available
+# signal. Allowlist, not "not OpenAI": an unrecognised model must never receive a
+# provider-specific parameter. Add new Anthropic families here as they ship.
+_ANTHROPIC_FAMILY_TOKENS: frozenset[str] = frozenset({
+    "claude",
+    "fable",
+    "mythos",
+})
+
+# Anthropic families that accept thinking.type="adaptive". Claude 4.5 and earlier
+# accept only type="enabled" and reject adaptive with 400 "adaptive thinking is
+# not supported on this model", so this is an allowlist of known-capable families
+# rather than the previous "everything except Haiku".
+_ADAPTIVE_MIN_VERSION: tuple[int, int] = (4, 6)
+_ADAPTIVE_CAPABLE_LINES: frozenset[str] = frozenset({"opus", "sonnet"})
+_ADAPTIVE_ALWAYS_CAPABLE: frozenset[str] = frozenset({"fable", "mythos"})
+
+# Matches a major[-minor] version anywhere in a normalized ID: "claude-4-6-opus",
+# "claude-sonnet-4-6", "claude-opus-5". Minor defaults to 0 when absent. Bounded to
+# two digits so trailing date stamps ("...-4-6-20250514") are not read as versions.
+_VERSION_PATTERN = re.compile(r"(?<!\d)(\d{1,2})(?:-(\d{1,2}))?(?!\d)")
+
+
+def _extract_version(normalized_id: str) -> tuple[int, int] | None:
+    matches = _VERSION_PATTERN.findall(normalized_id)
+    if not matches:
+        return None
+    major, minor = matches[0]
+    return int(major), int(minor or 0)
+
+
 def _is_claude_model(model_id: str) -> bool:
-    return "claude" in model_id.lower()
+    """True when the model belongs to an Anthropic family that supports ``thinking``."""
+    normalized = _normalize_model_id(model_id)
+    return any(token in normalized for token in _ANTHROPIC_FAMILY_TOKENS)
 
 
 def _is_small_context_claude(model_id: str) -> bool:
     """Haiku models have smaller max output (64k) so need a smaller budget."""
-    return "haiku" in model_id.lower()
+    return "haiku" in _normalize_model_id(model_id)
 
 
 def _supports_adaptive(model_id: str) -> bool:
-    """Adaptive thinking is supported on Opus 4.6+, Sonnet 4.6+, but NOT Haiku 4.5."""
-    return _is_claude_model(model_id) and not _is_small_context_claude(model_id)
+    """True only for Anthropic families documented to accept ``type="adaptive"``."""
+    if not _is_claude_model(model_id):
+        return False
+
+    normalized = _normalize_model_id(model_id)
+    if any(token in normalized for token in _ADAPTIVE_ALWAYS_CAPABLE):
+        return True
+
+    if not any(line in normalized for line in _ADAPTIVE_CAPABLE_LINES):
+        return False
+
+    version = _extract_version(normalized)
+    return version is not None and version >= _ADAPTIVE_MIN_VERSION
 
 
 def generate_thinking_variants(model: OpenAIModel) -> list[OpenAIModel]:
@@ -80,18 +135,38 @@ def generate_thinking_variants(model: OpenAIModel) -> list[OpenAIModel]:
     return variants
 
 
-def resolve_thinking_model(model: str) -> tuple[str, ThinkingConfig | None]:
-    if model.endswith(THINKING_SUFFIX_EXTENDED):
-        base = model.removesuffix(THINKING_SUFFIX_EXTENDED)
-        if _is_small_context_claude(base):
-            return base, EXTENDED_THINKING_CONFIG_SMALL
-        return base, EXTENDED_THINKING_CONFIG
+def _split_thinking_suffix(model: str) -> tuple[str, str | None]:
+    for suffix in (THINKING_SUFFIX_EXTENDED, THINKING_SUFFIX_ADAPTIVE):
+        if model.endswith(suffix):
+            return model.removesuffix(suffix), suffix
+    return model, None
 
-    if model.endswith(THINKING_SUFFIX_ADAPTIVE):
-        base = model.removesuffix(THINKING_SUFFIX_ADAPTIVE)
+
+def resolve_thinking_model(model: str) -> tuple[str, ThinkingConfig | None]:
+    """Strip a thinking suffix and return the config it maps to, if the model supports it."""
+    base, suffix = _split_thinking_suffix(model)
+    if suffix is None:
+        return model, None
+
+    if not _is_claude_model(base):
+        logger.warning(
+            "Ignoring %s suffix on non-Anthropic model %r: thinking is Anthropic-only",
+            suffix, base,
+        )
+        return base, None
+
+    if suffix == THINKING_SUFFIX_ADAPTIVE:
+        if not _supports_adaptive(base):
+            logger.warning(
+                "Ignoring %s suffix on %r: model does not support adaptive thinking",
+                suffix, base,
+            )
+            return base, None
         return base, ADAPTIVE_THINKING_CONFIG
 
-    return model, None
+    if _is_small_context_claude(base):
+        return base, EXTENDED_THINKING_CONFIG_SMALL
+    return base, EXTENDED_THINKING_CONFIG
 
 
 def apply_thinking_params(body: dict[str, Any], thinking_config: ThinkingConfig) -> dict[str, Any]:
@@ -184,6 +259,31 @@ def _ensure_stream_usage(body: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
+def _strip_incompatible_thinking(body: dict[str, Any]) -> dict[str, Any]:
+    """Drop a client-supplied ``thinking`` param when the target model cannot accept it.
+
+    ``thinking`` is Anthropic-only. Open WebUI forwards unknown top-level params
+    verbatim on non-Azure OpenAI connections, so sending it to an OpenAI-family
+    model reaches the provider and hard-fails with
+    400 ``unknown_parameter: 'thinking'``. Stripping keeps the request usable
+    instead of turning a recoverable call into a retry loop.
+    """
+    if "thinking" not in body:
+        return body
+
+    model = body.get("model", "")
+    if _is_claude_model(model):
+        return body
+
+    body.pop("thinking", None)
+    logger.warning(
+        "Stripped client-supplied 'thinking' param for non-Anthropic model %r "
+        "(parameter is Anthropic-only and would be rejected upstream)",
+        model,
+    )
+    return body
+
+
 _UNSUPPORTED_FIELDS: frozenset[str] = frozenset(
     {
         "vector_store_ids",
@@ -225,6 +325,7 @@ def _strip_session_id(body: dict[str, Any]) -> dict[str, Any]:
 def rewrite_chat_body(body: dict[str, Any]) -> dict[str, Any]:
     rewritten = {**body}
     rewritten = _strip_unsupported_fields(rewritten)
+    rewritten = _strip_incompatible_thinking(rewritten)
     rewritten = _scrub_bedrock_tool_fields(rewritten)
     rewritten = _ensure_stream_usage(rewritten)
     rewritten = _inject_chat_id(rewritten)

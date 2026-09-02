@@ -281,10 +281,11 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
 
     model = body.get("model", "")
     base_model, thinking_config = resolve_thinking_model(model)
+    if base_model != model:
+        body["model"] = base_model
     if thinking_config is not None:
         logger.info("Thinking variant detected: %s → base=%s config=%s",
                     model, base_model, thinking_config)
-        body["model"] = base_model
         body = apply_thinking_params(body, thinking_config)
 
     is_stream = body.get("stream") is True
