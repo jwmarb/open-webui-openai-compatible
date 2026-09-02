@@ -1,66 +1,61 @@
 # AGENTS.md
 
+**Commit:** `ff82e2b` · **Branch:** `main`
+
+FastAPI proxy exposing OpenAI- and Anthropic-compatible endpoints in front of an Open WebUI instance, authenticating with a user's browser JWT instead of an API key. Includes a headless-browser sidecar that obtains and auto-renews that JWT.
+
+Nested guides: [`src/proxy/openai/AGENTS.md`](src/proxy/openai/AGENTS.md) · [`src/proxy/anthropic/AGENTS.md`](src/proxy/anthropic/AGENTS.md) · [`tests/AGENTS.md`](tests/AGENTS.md)
+
 ## Quick reference
 
 ```sh
-# Activate environment (required for all commands)
-conda activate open-webui-openai-compatible
+# Install (pip, not conda — there is no environment.yml)
+pip install ".[dev]"
 
-# Lint
+# Lint + typecheck (both target src/ and tests/ only; tui.py and playwright_login.py are NOT covered)
 ruff check src/ tests/
-
-# Type check
 pyright src/
 
-# Unit tests (no credentials needed)
+# Unit tests — the 4 files CI runs
 python -m pytest tests/test_openai_translator.py tests/test_openai_routes.py tests/test_anthropic_translator.py tests/test_anthropic_routes.py -v
 
-# Integration tests (requires real credentials exported BEFORE pytest starts)
-OPEN_WEBUI_URL=https://your-open-webui-instance.example.com USER_TOKEN=<jwt> python -m pytest tests/integration/ -v
+# Unit tests NOT in CI (test_playwright_login.py needs playwright + a real browser)
+python -m pytest tests/test_auth.py tests/test_refresh_trigger.py tests/test_playwright_login.py -v
+
+# Integration tests — credentials must be EXPORTED BEFORE pytest starts
+OPEN_WEBUI_URL=https://your-instance.example.com USER_TOKEN=<jwt> python -m pytest tests/integration/ -v
 
 # Run server
-cp .env.example .env  # then edit with real values
+cp .env.example .env   # then edit
 uvicorn src.main:app --port 8000
 
-# Docker
+# Docker (builds Dockerfile.playwright, NOT Dockerfile) — auto-login + refresh timer
 docker compose up -d
+docker compose exec proxy python /app/playwright_login.py   # force a token refresh
 ```
 
 ## Structure
 
 ```
 open-webui-openai-compatible/
-├── src/                  # Proxy source with sub-packages
-│   ├── settings.py       # Pydantic Settings singleton — instantiated at import time
-│   ├── client.py         # Async httpx wrapper — used only for /v1/models
-│   ├── errors.py         # Shared error handling (OpenAI + Anthropic formats)
-│   ├── main.py           # FastAPI app — lifespan + /health + router includes
-│   ├── models.py         # Backward-compat re-export → src.proxy.openai.models
-│   ├── translator.py     # Backward-compat re-export → src.proxy.openai.translator
+├── src/
+│   ├── settings.py       # Pydantic Settings singleton — instantiated at import time (:38)
+│   ├── auth.py           # Token provider: token file → USER_TOKEN env → RuntimeError
+│   ├── client.py         # httpx wrapper — used ONLY for /v1/models
+│   ├── errors.py         # classify/log upstream errors + OpenAI-format error builder
+│   ├── main.py           # 69 lines: _TokenAuth hook, lifespan clients, /health
+│   ├── models.py         # Back-compat re-export → src.proxy.openai.models
+│   ├── translator.py     # Back-compat re-export → src.proxy.openai.translator
 │   └── proxy/
-│       ├── openai/
-│       │   ├── routes.py     # /v1/models, /v1/chat/completions handlers
-│       │   ├── translator.py # Model translation, body sanitization, thinking variants
-│       │   └── models.py     # Pydantic response types (OpenAI schema shapes)
-│       └── anthropic/
-│           ├── routes.py     # /v1/messages handler (streaming + non-streaming)
-│           ├── translator.py # Bidirectional Anthropic↔OpenAI translation
-│           └── models.py     # Pydantic types (Anthropic request/response)
-├── tests/
-│   ├── conftest.py       # Module-level env defaults + autouse monkeypatch
-│   ├── test_openai_translator.py
-│   ├── test_openai_routes.py
-│   ├── test_anthropic_translator.py
-│   ├── test_anthropic_routes.py
-│   └── integration/
-│       ├── conftest.py   # skip_without_real_instance marker + TestClient fixture
-│       ├── test_e2e.py
-│       ├── test_openai_sdk.py
-│       ├── test_anthropic_e2e.py
-│       ├── test_parallel_tool_calls.py
-│       └── test_orchestrator_tool_calls.py
-├── tui.py                # Standalone Textual TUI client (NOT part of src/)
-├── docs/                 # Architecture diagrams (dot/svg/png)
+│       ├── openai/       # GET /v1/models, POST /v1/chat/completions  → see its AGENTS.md
+│       └── anthropic/    # POST /v1/messages                          → see its AGENTS.md
+├── tests/                # 7 unit + 5 integration                     → see its AGENTS.md
+├── playwright_login.py   # Login sidecar: headless Chromium → JWT → token file
+├── entrypoint.sh         # Container startup: login if needed, refresh loop, exec uvicorn
+├── tui.py                # Standalone Textual client; talks to the PROXY. No src/ imports
+├── Dockerfile            # Minimal image — NOT used by compose
+├── Dockerfile.playwright # What compose builds (Chromium + entrypoint.sh)
+├── docs/adr/             # 0001 — rationale for the proxy/ sub-package split
 └── .github/workflows/ci.yml
 ```
 
@@ -68,212 +63,151 @@ open-webui-openai-compatible/
 
 | Task | Location | Notes |
 |------|----------|-------|
-| Add/modify OpenAI routes | `src/proxy/openai/routes.py` | `/v1/models`, `/v1/chat/completions` |
-| Add/modify Anthropic routes | `src/proxy/anthropic/routes.py` | `/v1/messages` |
-| Change Bedrock tool scrubbing | `_scrub_bedrock_tool_fields()` in `src/proxy/openai/translator.py` | Runs before stream injection |
-| Change thinking budget | Constants at top of `src/proxy/openai/translator.py` | `EXTENDED_THINKING_CONFIG`, `MIN_MAX_TOKENS_*` |
-| Add OpenAI response model | `src/proxy/openai/models.py` | Pydantic types matching OpenAI schema |
-| Add Anthropic model | `src/proxy/anthropic/models.py` | Pydantic types matching Anthropic schema |
-| Change Anthropic translation | `src/proxy/anthropic/translator.py` | Bidirectional Anthropic↔OpenAI |
-| Change upstream URLs | `src/client.py` | `/api/models` only; chat uses openai SDK |
-| Change env vars | `src/settings.py` | Then update `tests/conftest.py` defaults AND CI typecheck env |
-| Add SDK-known param | `_SDK_KNOWN_PARAMS` in `src/proxy/openai/routes.py` | Unlisted fields silently go to `extra_body` |
-| Change empty-stream retry | `_handle_streaming()` in `src/proxy/openai/routes.py` | Controlled by `settings.stream_empty_retry_max` |
-| Change shared error handling | `src/errors.py` | Both OpenAI and Anthropic formats |
-| Add OpenAI unit test | `tests/test_openai_routes.py` | Use `MockAsyncOpenAI` pattern for chat, `MockWebClient` for models |
-| Add Anthropic unit test | `tests/test_anthropic_routes.py` | Same mock pattern |
-| Add integration test | `tests/integration/` | Needs real creds; uses `skip_without_real_instance` |
-| TUI changes | `tui.py` (root) | Talks to proxy, not upstream; not linted/typechecked in CI |
+| OpenAI routes / thinking variants / Bedrock scrubbing | `src/proxy/openai/` | Has its own AGENTS.md |
+| Anthropic route / streaming translation | `src/proxy/anthropic/` | Has its own AGENTS.md |
+| Tests, mocks, fixtures | `tests/` | Has its own AGENTS.md |
+| Token source / expiry checks | `src/auth.py` | `get_current_token()` is the only token entry point |
+| Browser login / token file format | `playwright_login.py` | UA Shibboleth + Duo selectors; writes `{token, expires_at, retrieved_at}` |
+| Container startup / refresh timer | `entrypoint.sh` | `REFRESH_INTERVAL_SECONDS` (default 7200) |
+| Add env var | `src/settings.py` | Then update `tests/conftest.py` defaults AND the CI typecheck env |
+| Change upstream URL for models | `src/client.py` | `/api/models` only; chat goes through the openai SDK |
+| Shared error handling | `src/errors.py` | Both OpenAI and Anthropic formats |
+| Design rationale for the layout | `docs/adr/0001-anthropic-api-frontend-via-translation.md` | No status field; implemented |
 
 ## Architecture
 
-Multi-package FastAPI proxy with sub-packages under `src/proxy/`.
-
 | Module | Role |
 |--------|------|
-| `src/settings.py` | Pydantic Settings singleton — **instantiated at import time** |
-| `src/client.py` | Async httpx wrapper; accepts `base_url` and `token` via constructor — **used only for `/v1/models`** |
-| `src/errors.py` | Shared error handling — `classify_upstream_error`, `log_upstream_error`, `create_openai_error` |
-| `src/main.py` | FastAPI app with lifespan, `/health` route, and router includes |
-| `src/proxy/openai/translator.py` | Model list translation, request body rewriting (Bedrock scrubbing + stream usage), Claude thinking variant logic |
-| `src/proxy/openai/routes.py` | OpenAI route handlers: `/v1/models`, `/v1/chat/completions` |
-| `src/proxy/openai/models.py` | Pydantic types for OpenAI API shapes |
-| `src/proxy/anthropic/translator.py` | Bidirectional Anthropic↔OpenAI translation + streaming state machine |
-| `src/proxy/anthropic/routes.py` | Anthropic route handler: `POST /v1/messages` |
-| `src/proxy/anthropic/models.py` | Pydantic types for Anthropic API shapes |
-| `src/models.py` | Backward-compat re-export → `src.proxy.openai.models` |
-| `src/translator.py` | Backward-compat re-export → `src.proxy.openai.translator` |
-| `tui.py` | Standalone Textual TUI chat client — talks to the **proxy**, not upstream directly. Not part of the `src` package. |
+| `src/settings.py` | Settings singleton — **instantiated at import time** (`:38`) |
+| `src/auth.py` | Stateless token provider. No caching, no lock, all sync |
+| `src/client.py` | httpx wrapper for `GET /api/models` only. Accepts an injected client |
+| `src/errors.py` | `classify_upstream_error`, `log_upstream_error`, `create_openai_error` |
+| `src/main.py` | `_TokenAuth(httpx.Auth)` (`:29`), `_lifespan` (`:37`), `app` (`:62`), `/health` (`:67`) |
+| `src/models.py`, `src/translator.py` | Back-compat re-export shims (`# noqa: F401`) |
+| `tui.py` | Textual chat client. Reads `.env` directly via `load_dotenv`; `PROXY_URL` (default `http://localhost:8000`); sends no auth header |
 
-### Code map
+Dependency direction: `main → routes → {auth, errors, settings, translator} → models`. Two edges worth knowing: `anthropic/routes.py` imports the **private** `_split_body_for_sdk` from `openai/routes.py`, and `errors.py` depends on `proxy/openai/models.py` for the shared error shapes.
 
-| Symbol | Type | Location | Role |
-|--------|------|----------|------|
-| `Settings` | Class | `settings.py:9` | Pydantic Settings with `open_webui_url`, `user_token`, `port`, `request_timeout`, `stream_empty_retry_max`, `log_level` |
-| `settings` | Singleton | `settings.py:36` | Module-level instance — import triggers validation |
-| `WebClient` | Class | `client.py:17` | httpx wrapper: `get_models()`, `aclose()` |
-| `app` | FastAPI | `main.py:204` | App instance with lifespan (creates/closes `WebClient` and `AsyncOpenAI`) |
-| `_SDK_KNOWN_PARAMS` | Const | `proxy/openai/routes.py` | Whitelist of fields routed to SDK kwargs; everything else → `extra_body` |
-| `_split_body_for_sdk` | Func | `proxy/openai/routes.py` | Separates SDK kwargs from `extra_body` based on `_SDK_KNOWN_PARAMS` |
-| `classify_upstream_error` | Func | `errors.py` | Maps exceptions → `(message, error_type, http_status)` |
-| `_stream_with_first` | Func | `proxy/openai/routes.py` | Yields SSE bytes for pre-read first chunk + rest; synthesizes `finish_reason` if missing |
-| `_handle_streaming` | Func | `proxy/openai/routes.py` | Streaming path: first-chunk pre-read, empty-stream retry, SSE serialization |
-| `_handle_non_streaming` | Func | `proxy/openai/routes.py` | Non-streaming path: direct SDK call, JSON response |
-| `health` | Route | `main.py` | `GET /health` |
-| `models` | Route | `proxy/openai/routes.py` | `GET /v1/models` → upstream `GET /api/models` |
-| `chat_completions` | Route | `proxy/openai/routes.py` | `POST /v1/chat/completions` → upstream `POST /api/chat/completions` |
-| `messages` | Route | `proxy/anthropic/routes.py` | `POST /v1/messages` → translate to OpenAI → upstream |
-| `translate_models_response` | Func | `proxy/openai/translator.py` | Raw upstream → OpenAI `ModelList` |
-| `rewrite_chat_body` | Func | `proxy/openai/translator.py` | Bedrock tool scrubbing + stream usage injection + chat_id |
-| `sanitize_chat_body` | Alias | `proxy/openai/translator.py` | Alias for `rewrite_chat_body` (backward compat) |
-| `resolve_thinking_model` | Func | `proxy/openai/translator.py` | Strip `:extended`/`:adaptive` suffix, return thinking config |
-| `apply_thinking_params` | Func | `proxy/openai/translator.py` | Inject `thinking` param + ensure sufficient `max_tokens` |
-| `generate_thinking_variants` | Func | `proxy/openai/translator.py` | Create virtual `:extended`/`:adaptive` model entries |
-| `create_openai_error` | Func | `errors.py` | Build OpenAI-format error JSON |
-| `translate_request` | Func | `proxy/anthropic/translator.py` | Anthropic request → OpenAI request body |
-| `translate_response` | Func | `proxy/anthropic/translator.py` | OpenAI response → Anthropic response |
-| `StreamingState` | Class | `proxy/anthropic/translator.py` | Stateful OpenAI chunk → Anthropic SSE event translation |
-| `create_anthropic_error` | Func | `proxy/anthropic/translator.py` | Build Anthropic-format error JSON |
-| `OpenAIModel` / `OpenAIModelList` | Pydantic | `proxy/openai/models.py` | Model list response types |
-| `ThinkingConfig` | Pydantic | `proxy/openai/models.py` | `type` + `budget_tokens` |
-| `OpenAIErrorDetail` / `OpenAIErrorResponse` | Pydantic | `proxy/openai/models.py` | `{"error": {"message", "type", "code"}}` |
+### Routes — exactly 4
 
-### Request flow
+| Route | Defined at | Upstream |
+|-------|-----------|----------|
+| `GET /health` | `main.py:67` | — |
+| `GET /v1/models` | `proxy/openai/routes.py:236` | `GET /api/models` (via `WebClient`) |
+| `POST /v1/chat/completions` | `proxy/openai/routes.py:269` | `POST /api/chat/completions` (via openai SDK) |
+| `POST /v1/messages` | `proxy/anthropic/routes.py:55` | `POST /api/chat/completions` (via openai SDK) |
 
-1. Client sends OpenAI-compatible request to proxy
-2. `rewrite_chat_body()` processes the request in two passes:
-   a. **Bedrock tool scrubbing** — removes empty `tools`/`tool_choice`/`parallel_tool_calls`, coerces `tool_choice:"any"/"required"` → `"auto"`, strips `tool_choice:"none"` and its tools, injects a dummy tool when conversation history references tools but the request declares none, removes legacy `functions`/`function_call`
-   b. **Stream usage injection** — ensures `stream_options.include_usage=true` on streaming requests
-3. `resolve_thinking_model()` checks for `:extended`/`:adaptive` suffix, strips it, returns thinking config
-4. `apply_thinking_params()` injects `thinking` param and ensures `max_tokens` is sufficient
-5. `_split_body_for_sdk()` separates fields into SDK kwargs (standard OpenAI params) and `extra_body` (non-standard fields like `thinking`, provider-specific pass-through)
-6. `openai.AsyncOpenAI.chat.completions.create()` forwards to upstream Open WebUI `/api/chat/completions`
-7. Response is passed through (chat) or translated (models only)
+No `/v1/models/{id}`, no embeddings, no CORS middleware. The proxy deliberately avoids Open WebUI's own `/v1/*` paths — those require an `sk-` API key, not a JWT. `AsyncOpenAI.base_url` is `{open_webui_url}/api` so the SDK's `/chat/completions` lands on `/api/chat/completions`.
 
-### Streaming error handling
+Two HTTP clients coexist: `WebClient` (raw httpx, models only — Open WebUI returns a non-OpenAI JSON shape there) and `openai.AsyncOpenAI` (chat only — for SSE streaming). Both are created in `_lifespan` and stored on `app.state`.
 
-Streaming uses the openai SDK's `AsyncStream[ChatCompletionChunk]` which returns parsed chunk objects. The proxy re-serializes each chunk to SSE format via `chunk.model_dump_json(exclude_unset=True)` and appends `data: [DONE]` when the stream ends.
+## Authentication & token refresh
 
-The proxy uses a first-chunk pre-read pattern: it calls `__anext__()` on the stream *before* returning `StreamingResponse`. If the upstream rejects immediately (e.g. 400), the proxy returns a proper HTTP error JSON response.
+The JWT is never baked into a client. `_TokenAuth.auth_flow` (`main.py:30-33`) calls `get_current_token()` and overwrites the `Authorization` header on **every outgoing request**, so a refreshed token takes effect on the next request with no restart and no client rebuild. `AsyncOpenAI` gets a placeholder `api_key="proxy-auth-via-hook"` (`main.py:52`) that the hook replaces.
 
-**Empty-stream retry**: If the first `__anext__()` raises any exception (including `StopAsyncIteration`), the proxy retries up to `settings.stream_empty_retry_max` times (default 3) with exponential backoff (`1 << attempt` seconds, capped at 120s). **4xx client errors are never retried** — they short-circuit immediately. On retry exhaustion with `StopAsyncIteration`, a synthetic `finish_reason="stop"` chunk is returned as a valid 200 SSE stream.
+Token resolution order (`auth.py:83`): token file (`TOKEN_FILE`, default `~/.config/open-webui-proxy/token.json`) → `USER_TOKEN` env → `RuntimeError`. The file is JSON `{token, expires_at, retrieved_at}`, mode 0600; the proxy reads only `token` and decodes `exp` from the JWT itself.
 
-Error handling distinguishes specific failure modes:
-- `openai.APIStatusError` → upstream HTTP error (preserves status code)
-- `openai.APITimeoutError` → 504 with `timeout_error` type
-- `openai.APIConnectionError` → 502 connection failure
-- Other exceptions → 502 generic, but **logged with exception type** for debugging
+Refresh paths:
+1. **Startup** (`entrypoint.sh`): if no usable token and `UA_NETID`/`UA_NETID_PASSWORD` are set, run `playwright_login.py` before serving.
+2. **Timer** (`entrypoint.sh:86-91`): a background shell loop every `REFRESH_INTERVAL_SECONDS` (default 7200). A loop, not cron, so the container needs no root.
+3. **On 401** (`proxy/openai/routes.py`): if the token is a decodable-but-expired JWT, or the error body carries a code in `_TOKEN_REJECTION_CODES`, spawn the sidecar (flock-guarded, detached) and return **503**. The client retries; the proxy does not retry the request itself.
 
-Errors that occur mid-stream (after headers are sent) emit SSE error events: `data: {"error": ...}` followed by `data: [DONE]`.
+`is_token_expired_or_invalid` returns `False` for a *malformed* token on purpose (`auth.py:37-41`) — a browser re-login cannot repair a garbled token, so it must not trigger a refresh.
 
-The `StreamingResponse` includes `Cache-Control: no-cache` and `X-Accel-Buffering: no` headers to prevent reverse proxy (nginx/Caddy) buffering of SSE streams.
+**The Anthropic route has no 401-refresh logic.** It passes 401s through. Since both routes share one token file and one auth hook, a refresh triggered by an OpenAI-route request does benefit `/v1/messages` — but an Anthropic-originated 401 never starts one.
 
-### Streaming finish-reason guard
+## Environment variables
 
-`_stream_with_first()` tracks whether any chunk contained a non-null `finish_reason`. If the stream ends without one, it synthesizes a `finish_reason: "stop"` chunk. This prevents clients from hanging when upstream omits the termination signal.
+| Variable | Read by | Default |
+|----------|---------|---------|
+| `OPEN_WEBUI_URL` | `settings.py:13` (required), `playwright_login.py`, `entrypoint.sh` | — |
+| `USER_TOKEN` | `auth.py:79`, `settings.py:14` (now **optional**) | — |
+| `TOKEN_FILE` | `auth.py:20`, sidecar, compose | `~/.config/open-webui-proxy/token.json` (`/data/token.json` in Docker) |
+| `UA_NETID` / `UA_NETID_PASSWORD` | `settings.py:15-16`, `playwright_login.py` | — |
+| `BROWSER_PROFILE_DIR` | sidecar, `entrypoint.sh`, compose | `/data/browser-profile` |
+| `REFRESH_INTERVAL_SECONDS` | `entrypoint.sh` only | `7200` |
+| `PLAYWRIGHT_HEADLESS` | `playwright_login.py` | `true` |
+| `PORT` / `REQUEST_TIMEOUT` / `STREAM_EMPTY_RETRY_MAX` / `LOG_LEVEL` | `settings.py:17-20` | `8000` / `300` (10-3600) / `3` (0-10) / `INFO` |
+| `PROXY_URL` | `tui.py` only | `http://localhost:8000` |
 
-### Claude thinking variants
-
-Models with `"claude"` in the ID get virtual thinking variants appended to `/v1/models`:
-- `:extended` — `thinking.type=enabled` with `budget_tokens` (32k standard, 16k for Haiku)
-- `:adaptive` — `thinking.type=adaptive` (not generated for Haiku, which doesn't support it)
-
-The variant suffix is stripped before forwarding to upstream. The `thinking` param is injected by `apply_thinking_params()` after `rewrite_chat_body()` runs.
+`.env.example` documents 8 of these; `TOKEN_FILE`, `BROWSER_PROFILE_DIR`, `REFRESH_INTERVAL_SECONDS`, `PLAYWRIGHT_HEADLESS`, and `PROXY_URL` are not in it.
 
 ## Critical gotcha: settings singleton
 
-`src/settings.py` runs `settings = Settings()` at **module level** (line 36). This means:
+`src/settings.py:38` runs `settings = Settings()` at **module level**:
 
-- Importing _any_ `src` module triggers settings validation.
-- If `OPEN_WEBUI_URL` or `USER_TOKEN` are missing, the import crashes with `ValidationError`.
-- Tests handle this via `os.environ.setdefault()` at the top of `tests/conftest.py` — this runs before any `src` import during collection.
-- The root conftest also has an `autouse` fixture that monkeypatches env vars for each test.
-- The `Settings()` call has a `# type: ignore[call-arg]` comment because Pyright cannot see pydantic-settings' env-var injection. This is expected — do not remove the suppression.
-- The CI typecheck job injects dummy env vars (`OPEN_WEBUI_URL`, `USER_TOKEN`) inline in `.github/workflows/ci.yml` for the same reason.
+- Importing *any* `src` module triggers validation. Missing `OPEN_WEBUI_URL` crashes the import with `ValidationError`. `USER_TOKEN` is now optional, so its absence does not.
+- Tests survive via `os.environ.setdefault()` at the top of `tests/conftest.py`, which runs before any `src` import during collection.
+- CI's typecheck job injects dummy env vars inline in `.github/workflows/ci.yml` for the same reason.
+- The `# type: ignore[call-arg]` on that line is required — Pyright cannot see pydantic-settings' env injection. Do not remove it.
 
-**When adding new test files**: always ensure `tests/conftest.py` is loaded first (pytest does this automatically for files under `tests/`). Never import from `src` at the module level of a test file without the conftest guard.
+When adding a **required** settings field, update `tests/conftest.py` and the CI typecheck env, or both break.
 
-**When adding new required settings fields**: update `tests/conftest.py` `os.environ.setdefault()` block AND the CI typecheck job env vars, or both will break.
+## Request flow
 
-## Testing
+1. Client sends an OpenAI-compatible request (or an Anthropic one, which `translate_request()` converts first).
+2. `rewrite_chat_body()` runs **six ordered passes**: strip unsupported fields → incompatible-`thinking` stripping → Bedrock tool scrubbing → stream-usage injection → `chat_id` injection → `session_id` stripping. Details in `src/proxy/openai/AGENTS.md`.
+3. `resolve_thinking_model()` strips any `:extended`/`:adaptive` suffix and returns a thinking config (only for Anthropic models that support it; the suffix is stripped either way).
+4. `apply_thinking_params()` injects `thinking` and raises `max_tokens` to a sufficient floor.
+5. `_split_body_for_sdk()` splits fields into SDK kwargs vs `extra_body` using `_SDK_KNOWN_PARAMS`.
+6. `AsyncOpenAI.chat.completions.create()` forwards upstream.
+7. Chat responses pass through (or are translated back for Anthropic); only the model list is reshaped.
 
-- **Unit tests** (`tests/test_openai_translator.py`, `tests/test_openai_routes.py`): Mock the `WebClient` via `unittest.mock.patch("src.main.WebClient")`. Use the custom `MockWebClient` class (not `AsyncMock`) — it has real async methods so `lifespan` can call `await aclose()`. Chat completions tests also mock `openai.AsyncOpenAI` via `patch("src.main.openai.AsyncOpenAI")` using `MockAsyncOpenAI` which supports `chat.completions.create()` and `close()`.
-- **Dual-patch pattern**: Every unit test patches both `WebClient` and `AsyncOpenAI` via the `_patches()` helper — both must be patched even when testing only one route, because the FastAPI `lifespan` creates both clients at startup.
-- **Integration tests** (`tests/integration/`): Use real credentials. Skip automatically when env vars are test defaults. The skip guard reads from the already-instantiated `settings` singleton, not raw env vars.
-- **OpenAI SDK tests** (`tests/integration/test_openai_sdk.py`): Wire the OpenAI client through `TestClient` via `http_client=client` with `base_url="http://testserver/v1"`. Covers models, streaming, tool calls, and thinking variants.
-- **Parallel tool call tests** (`tests/integration/test_parallel_tool_calls.py`, `test_orchestrator_tool_calls.py`): Verify proxy doesn't drop/truncate parallel tool call deltas; stress test with 8-way parallel subagent roundtrips.
-- Integration tests need real env vars **exported before pytest starts** (not just in `.env`) because `os.environ.setdefault` in the root conftest won't overwrite pre-existing vars.
-- **Async generator mock pattern**: Tests use `yield  # noqa: F841` after `raise` to make async functions into generators. This is intentional — do not remove the `# noqa` comments.
-- **Settings-dependent tests** (e.g. `TestStreamEmptyRetry`): patch `src.proxy.openai.routes.settings` and set ALL attributes the route handler reads (not just the one under test), or you'll get `AttributeError`.
-- **Captured kwargs pattern**: Tests asserting upstream params use `captured: dict = {}` closure in the mock handler, then assert on `captured["model"]`, `captured["extra_body"]`, etc.
+## Streaming
+
+Chunks arrive as parsed `ChatCompletionChunk` objects and are re-serialized with `model_dump_json(exclude_unset=True)`, terminated by `data: [DONE]`.
+
+**First-chunk pre-read**: `__anext__()` is called before `StreamingResponse` is returned, so an immediate upstream rejection becomes a proper HTTP error instead of a broken stream.
+
+**Empty-stream retry**: total attempts = `1 + settings.stream_empty_retry_max`, backoff `min(1 << attempt, 120)`. **4xx is never retried.** On exhaustion via `StopAsyncIteration`, a synthetic `finish_reason="stop"` chunk is returned as a valid 200 SSE stream.
+
+**Finish-reason guard**: if no chunk carried a non-null `finish_reason`, one is synthesized so clients don't hang.
+
+Mid-stream failures (headers already sent) emit `data: {"error": ...}` then `data: [DONE]`. A mid-stream 401 is *not* refresh-eligible — only the two pre-stream windows are.
+
+Error mapping: `APIStatusError` → preserve status · `APITimeoutError` → 504 · `APIConnectionError` → 502 · anything else → 502, logged with the exception type.
+
+## Claude thinking variants
+
+Models from an Anthropic family (`claude`, `fable`, `mythos` in the ID) get virtual variants appended to `/v1/models`: `:extended` (`thinking.type=enabled`, 32k budget / 16k Haiku) and `:adaptive` (`thinking.type=adaptive`, only for Opus/Sonnet >= 4.6 and the `fable`/`mythos` families — Claude 4.5 and earlier reject adaptive upstream). The suffix is stripped before forwarding, including when the variant is refused.
+
+A client-supplied `thinking` param is stripped for non-Anthropic models. It is Anthropic-only, and Open WebUI forwards unknown top-level params verbatim, so leaving it in produces upstream `400 unknown_parameter: 'thinking'`. `reasoning_effort` is passed through untouched — Open WebUI supports it natively and LiteLLM translates it across providers.
 
 ## Conventions
 
-- **Python 3.12+**, `ruff` for linting, `pyright` (standard mode) for type checking.
-- **Line length**: 120 chars.
-- **Ruff rules**: `E, F, W, I, UP` only. No docstring or naming convention enforcement.
-- **Env management**: conda (`conda activate open-webui-openai-compatible`).
-- **All config in `pyproject.toml`** — no standalone ruff.toml, pyrightconfig.json, etc.
-- **`tui.py` is not covered by CI** — `ruff check` and `pyright` both only target `src/` and `tests/`.
-- **No pytest config** — no `[tool.pytest.ini_options]` in pyproject.toml; test paths must be specified explicitly. Running bare `pytest` discovers integration tests that need real credentials.
-
-## Request body rewriting
-
-`rewrite_chat_body()` in `translator.py` applies two passes:
-
-1. **Bedrock tool-field scrubbing** (ported from `opencode-openwebui-auth`):
-   - Empty `tools` list → removes `tools`, `tool_choice`, `parallel_tool_calls`
-   - If conversation history references tool calls/results but no tools declared → injects a dummy tool so LiteLLM+Bedrock validation passes
-   - `tool_choice: "none"` → strips tools entirely (Bedrock doesn't support it)
-   - `tool_choice: "any"` or `"required"` → coerced to `"auto"` (closest Bedrock equivalent)
-   - `tool_choice: {"type": "none"/"any"/"required"}` → same dict-form handling
-   - Legacy `functions`/`function_call` fields → always stripped (Bedrock chokes on these)
-
-2. **Stream usage injection**: When `stream: true`, ensures `stream_options.include_usage` is set to `true` so token usage data comes back in the SSE stream.
-
-All other fields from the client request are passed through to upstream unchanged. The `thinking` param is injected by `apply_thinking_params()` after rewriting.
-
-`sanitize_chat_body` is retained as an alias for `rewrite_chat_body` for backward compatibility.
-
-## Upstream endpoint mapping
-
-The proxy does **not** use Open WebUI's `/v1/*` paths (those require API keys, not JWTs).
-
-| Proxy route | Upstream path | Auth |
-|-------------|--------------|------|
-| `GET /v1/models` | `GET /api/models` | Bearer JWT |
-| `POST /v1/chat/completions` | `POST /api/chat/completions` | Bearer JWT |
-| `POST /v1/messages` | `POST /api/chat/completions` | Bearer JWT |
-
-The `AsyncOpenAI` client's `base_url` is set to `{open_webui_url}/api` (not `/v1`) so the SDK's `/chat/completions` path maps correctly to `/api/chat/completions`.
-
-Two HTTP clients coexist: `WebClient` (raw httpx, models only) and `openai.AsyncOpenAI` (chat completions only). The split exists because models use Open WebUI's non-OpenAI JSON shape requiring raw httpx, while chat uses the OpenAI SDK's SSE streaming.
-
-Two HTTP clients coexist: `WebClient` (raw httpx, models only) and `openai.AsyncOpenAI` (chat completions only). The split exists because models use Open WebUI's non-OpenAI JSON shape requiring raw httpx, while chat uses the OpenAI SDK's SSE streaming.
+- **Python 3.12+**, ruff (lint), pyright (standard mode).
+- **Line length 120.** Ruff rules: `E, F, W, I, UP` only.
+- **All tool config lives in `pyproject.toml`** — no `ruff.toml`, no `pyrightconfig.json`, no `environment.yml`.
+- Dependencies are managed with **pip** (`pip install ".[dev]"`). There is no conda env file despite older docs claiming one.
+- `pyproject.toml` **does** define `[tool.pytest.ini_options]`, registering an `integration` marker — which is never actually applied (tests use a skipif instead).
+- `tui.py` and `playwright_login.py` are outside CI's lint/typecheck scope.
 
 ## CI pipeline
 
-GitHub Actions (`.github/workflows/ci.yml`): 4 jobs, all on Python 3.12.
+`.github/workflows/ci.yml` — 4 jobs on Python 3.12. `lint` (`ruff check src/ tests/`), `typecheck` (`pyright src/`, dummy env vars), and `unit-tests` run in parallel; `integration-tests` fans in after all three. Integration is double-guarded: a job-level `if` blocks fork PRs, and a shell null check exits 0 when secrets are absent. No build, push, cache, or deploy.
 
-1. **lint** — `ruff check src/ tests/` (installs only `ruff`, not full package)
-2. **typecheck** — `pyright src/` (with dummy env vars — required because settings singleton fires at import time)
-3. **unit-tests** — `pytest tests/test_openai_translator.py tests/test_openai_routes.py tests/test_anthropic_translator.py tests/test_anthropic_routes.py -v`
-4. **integration-tests** — runs after lint+typecheck+unit pass; two-layer skip: job-level `if` blocks fork PRs, shell-level null check handles missing secrets
-
-`lint`, `typecheck`, and `unit-tests` run in parallel. `integration-tests` fans in after all three pass.
-
-No Docker build/push, no pip caching, no deploy step — purely quality gates.
+**Known gap:** the `unit-tests` job runs only the original four test files. `test_auth.py`, `test_refresh_trigger.py`, and `test_playwright_login.py` never run in CI.
 
 ## Constraints
 
-- No hardcoded URLs anywhere in `src/` — all from `settings`.
-- Error responses must use OpenAI JSON format: `{"error": {"message", "type", "code"}}`.
-- Never expose `OPEN_WEBUI_URL` or `USER_TOKEN` values in error messages or logs.
-- Only 4 routes exist. No `/v1/models/{id}`, no embeddings, no CORS middleware.
-- `max_retries=0` on the `AsyncOpenAI` client — proxy handles retries itself. Do not raise above 0 or retries will double-fire.
-- `_SSE_HEADERS` must always be present on `StreamingResponse` — stripping them breaks streaming behind reverse proxies.
-- Do not remove the `# type: ignore[call-arg]` on `Settings()` (`settings.py:36`) — Pyright can't see pydantic-settings env injection.
-- Do not remove the `# type: ignore[union-attr]` on `main.py:293` or `# type: ignore[arg-type]` on `main.py:329` — flow-guaranteed non-None, Pyright can't prove it.
-- `tests/test_app.py` has `# noqa: F841` on async generator lines (8 instances) — intentional, do not remove.
-- Adding a new upstream parameter requires updating `_SDK_KNOWN_PARAMS` (`main.py:47`) or it silently routes to `extra_body`.
-- Haiku models must never receive `type="adaptive"` thinking config — `_supports_adaptive()` in `translator.py:52` enforces this.
+- No hardcoded URLs in `src/` — everything comes from `settings`.
+- Error responses use OpenAI format `{"error": {"message", "type", "code"}}`; the Anthropic route uses Anthropic's format.
+- Never put `USER_TOKEN` in a log or error message. Token values are currently never logged. **Note:** `src/client.py:39` does log the upstream base URL at DEBUG.
+- `max_retries=0` on `AsyncOpenAI` (`main.py:55`) — the proxy owns retries. Raising it double-fires them.
+- `_SSE_HEADERS` must stay on every `StreamingResponse` or streaming breaks behind nginx/Caddy. It is defined **twice** (`proxy/openai/routes.py:34`, `proxy/anthropic/routes.py:28`) — keep them in sync.
+- Do not remove these suppressions: `settings.py:38` `[call-arg]`; `proxy/openai/routes.py:333` `[union-attr]` and `:388` `[arg-type]`; `proxy/anthropic/routes.py:102` and `:141` `[union-attr]`.
+- Adding an upstream parameter requires adding it to `_SDK_KNOWN_PARAMS` (`proxy/openai/routes.py:41`) or it silently routes to `extra_body`.
+- Docker: compose builds `Dockerfile.playwright`. `docker compose down -v` deletes the volume holding the token **and** the browser profile, forcing a full interactive Duo login next start.
+
+## Known issues
+
+| Issue | Location |
+|-------|----------|
+| `/v1/messages` never calls `resolve_thinking_model`, so an `:extended`/`:adaptive` suffix reaches upstream as a literal model ID and 404s. The OpenAI route handles it; the Anthropic route does not | `proxy/anthropic/routes.py:68-72` |
+| `translate_request` maps Anthropic `output_config.effort` to a bare top-level `effort` key, which is not a documented upstream param (adaptive depth is set via `output_config.effort`). Suspect — verify against LiteLLM's Bedrock adapter before relying on it | `proxy/anthropic/translator.py:233` |
+| Sidecar fallback path is misspelled with a hyphen (`playwright-login.py`); the real file uses an underscore, so the fallback can never resolve | `proxy/openai/routes.py:139` |
+| `_MAX_ERROR_LOG_CHARS` defined but never used | `src/client.py:10` |
+| `is_token_expired` duplicates `is_token_expired_or_invalid`; only tests import it | `src/auth.py:54` |
+| The 6 Anthropic SSE event classes are declared but unused — the translator emits plain dicts. `AnthropicRequest` and the request-side block models are likewise unused (`translate_request` works on raw dicts) | `proxy/anthropic/models.py:213-241` |
+| `docs/architecture.{dot,svg,png}` predate the Anthropic frontend: no `/v1/messages`, client labeled "OpenAI Client". Embedded in README | `docs/` |
+| Stale bytecode for deleted tests (`test_app`, `test_translator`) | `tests/__pycache__/` |
