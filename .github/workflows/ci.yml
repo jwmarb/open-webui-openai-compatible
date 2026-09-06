@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ruff
-      - run: ruff check src/ tests/
+      - run: ruff check src/ tests/ playwright_login.py
 
   typecheck:
     runs-on: ubuntu-latest
@@ -38,7 +38,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ".[dev]"
-      - run: python -m pytest tests/test_openai_translator.py tests/test_openai_routes.py tests/test_anthropic_translator.py tests/test_anthropic_routes.py -v
+      # Every unit test file except test_playwright_login.py, which needs a real browser.
+      - run: python -m pytest tests/ --ignore=tests/integration --ignore=tests/test_playwright_login.py -v
 
   integration-tests:
     runs-on: ubuntu-latest

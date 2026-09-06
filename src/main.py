@@ -1,19 +1,25 @@
-"""FastAPI proxy exposing OpenAI-compatible endpoints backed by Open WebUI."""
+"""FastAPI application composition.
+
+`create_app()` is the seam: it accepts the upstream clients so tests can supply
+fakes without patching module namespaces. `app` is the default production
+instance for uvicorn.
+"""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 import httpx
 import openai
 from fastapi import FastAPI
 
 from .auth import get_current_token
-from .client import WebClient
 from .proxy.anthropic.routes import router as anthropic_router
 from .proxy.openai.routes import router as openai_router
-from .settings import settings
+from .settings import Settings, settings
 
 _pkg_logger = logging.getLogger("src")
 _pkg_logger.setLevel(getattr(logging, settings.log_level))
@@ -23,47 +29,70 @@ if not _pkg_logger.handlers:
         "%(asctime)s %(levelname)-8s %(name)s — %(message)s"))
     _pkg_logger.addHandler(_handler)
 
-__all__ = ["app"]
+__all__ = ["UpstreamClients", "app", "build_upstream_clients", "create_app"]
 
 
 class _TokenAuth(httpx.Auth):
+    """Re-reads the token per request so a refresh takes effect without a restart."""
+
     def auth_flow(self, request: httpx.Request):
-        token = get_current_token()
-        request.headers["Authorization"] = f"Bearer {token}"
+        request.headers["Authorization"] = f"Bearer {get_current_token()}"
         yield request
 
 
-@asynccontextmanager
-async def _lifespan(app: FastAPI):
+@dataclass(slots=True)
+class UpstreamClients:
+    models: httpx.AsyncClient
+    chat: openai.AsyncOpenAI
+
+    async def aclose(self) -> None:
+        await self.chat.close()
+        await self.models.aclose()
+
+
+def build_upstream_clients(config: Settings) -> UpstreamClients:
     auth = _TokenAuth()
-    web_httpx_client = httpx.AsyncClient(
-        base_url=settings.open_webui_url,
-        timeout=httpx.Timeout(float(settings.request_timeout), connect=10.0),
-        auth=auth,
+    timeout = httpx.Timeout(float(config.request_timeout), connect=10.0)
+
+    models_client = httpx.AsyncClient(base_url=config.open_webui_url, timeout=timeout, auth=auth)
+    chat_http = httpx.AsyncClient(base_url=f"{config.open_webui_url}/api", timeout=timeout, auth=auth)
+
+    return UpstreamClients(
+        models=models_client,
+        chat=openai.AsyncOpenAI(
+            api_key="proxy-auth-via-hook",
+            base_url=f"{config.open_webui_url}/api",
+            http_client=chat_http,
+            max_retries=0,
+        ),
     )
-    app.state.web_client = WebClient(client=web_httpx_client)
-
-    openai_httpx_client = httpx.AsyncClient(
-        base_url=f"{settings.open_webui_url}/api",
-        timeout=httpx.Timeout(float(settings.request_timeout), connect=10.0),
-        auth=auth,
-    )
-    app.state.openai_client = openai.AsyncOpenAI(
-        api_key="proxy-auth-via-hook",
-        base_url=f"{settings.open_webui_url}/api",
-        http_client=openai_httpx_client,
-        max_retries=0,
-    )
-    yield
-    await app.state.openai_client.close()
-    await app.state.web_client.aclose()
 
 
-app = FastAPI(title="OpenAI-Compatible Proxy", lifespan=_lifespan)
-app.include_router(openai_router)
-app.include_router(anthropic_router)
+def create_app(
+    config: Settings | None = None,
+    clients: UpstreamClients | None = None,
+) -> FastAPI:
+    config = config or settings
+
+    @asynccontextmanager
+    async def _lifespan(instance: FastAPI) -> AsyncIterator[None]:
+        upstream = clients or build_upstream_clients(config)
+        instance.state.models_client = upstream.models
+        instance.state.openai_client = upstream.chat
+        try:
+            yield
+        finally:
+            await upstream.aclose()
+
+    instance = FastAPI(title="OpenAI-Compatible Proxy", lifespan=_lifespan)
+    instance.include_router(openai_router)
+    instance.include_router(anthropic_router)
+
+    @instance.get("/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    return instance
 
 
-@app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+app = create_app()

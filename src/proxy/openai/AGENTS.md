@@ -1,59 +1,67 @@
 # src/proxy/openai/
 
-The OpenAI-compatible surface: `GET /v1/models` (routes.py:236) and `POST /v1/chat/completions` (routes.py:269). Reads a request, rewrites it (translator.py), splits it for the openai SDK (routes.py), and streams or returns the result. Shared infra (`settings`, `client`, `errors`, `auth`) lives at `src/` root.
+The OpenAI-compatible **frontend**: `GET /v1/models` (routes.py:153) and `POST /v1/chat/completions` (routes.py:185). It owns OpenAI wire format only — request shapes, SSE framing, error bodies, and the thinking-variant surface. **Gateway policy lives in `src/open_webui/`, not here.**
+
+Vocabulary: [`CONTEXT.md`](../../../CONTEXT.md).
 
 ## Where to look
 
 | Task | Location |
 |------|----------|
 | Route handlers, streaming, empty-stream retry, 401 refresh | `routes.py` |
-| Body rewriting, thinking-variant generation/resolution | `translator.py` |
+| Thinking-variant generation/resolution, model-list translation | `translator.py` |
+| OpenAI error body | `errors.py` |
 | Pydantic response shapes | `models.py` |
-| Cross-package consumer (imports helpers below) | `../anthropic/routes.py` |
+| The seven rewrite passes, SDK split | `../../open_webui/request_policy.py` |
+| What a model accepts | `../../open_webui/capabilities.py` |
 
-## Cross-package contracts (breaking these breaks the Anthropic route)
+## What this package no longer owns
 
-- `_split_body_for_sdk` (routes.py:58) is imported from `../anthropic/routes.py:17`. A private symbol crossing a package boundary. Signature change = Anthropic route break.
-- `rewrite_chat_body` is imported from `../anthropic/routes.py:18`.
-- `_SSE_HEADERS` (routes.py:34: `Cache-Control: no-cache`, `X-Accel-Buffering: no`) is duplicated at `../anthropic/routes.py:28`. Keep both in sync. Required on every `StreamingResponse` or SSE breaks behind nginx/Caddy.
-- `models.py` error shapes (`OpenAIErrorDetail` :33, `OpenAIErrorResponse` :41) are consumed by `src/errors.py`.
+Backend policy moved out. Nothing here re-derives a model family, and no private symbol is imported across a package seam.
+
+| Was here | Now |
+|---|---|
+| `_SDK_KNOWN_PARAMS` (private) | `open_webui/request_policy.py:29` `SDK_KNOWN_PARAMS` (**public**) |
+| `_split_body_for_sdk` (private, imported by the Anthropic route) | `open_webui/request_policy.py:222` `split_body_for_sdk` |
+| The 7 rewrite passes + `rewrite_chat_body` | `open_webui/request_policy.py` |
+| 7 model-family predicates (`_is_claude_model`, `_supports_adaptive`, `_requires_adaptive`, `_adaptive_capability`, `_extract_version`, `_normalize_model_id`, `_is_small_context_claude`) | `open_webui/capabilities.py` → one `capabilities_for()` call |
+| `create_openai_error` (lived in `src/errors.py`) | `errors.py` in this package |
+| `_should_refresh_token`, `_extract_error_code`, `_trigger_refresh`, `_TOKEN_REJECTION_CODES`, `REFRESH_LOCK_PATH`, `PROJECT_ROOT`, `_REFRESH_SCRIPT` | `src/auth.py` (the token store) |
+
+`rewrite_chat_body` and `sanitize_chat_body` are still importable from `translator.py` as re-exports, because `tests/test_openai_translator.py` and the `src/translator.py` shim consume them.
 
 ## routes.py
 
-- `_SDK_KNOWN_PARAMS` (routes.py:41-48): frozenset of params `AsyncOpenAI.chat.completions.create()` accepts as kwargs. Anything not in the set goes to `extra_body`. Adding an upstream param without adding it here = silent mis-routing to `extra_body`.
-- `_split_body_for_sdk` (routes.py:58) partitions the body on that set.
-- Streaming retry (routes.py:303-391): total attempts = `1 + settings.stream_empty_retry_max`. Backoff `min(1 << attempt, _RETRY_BACKOFF_CAP)` (routes.py:50, applied at :346 and :359). 4xx short-circuits, never retried (routes.py:342-343, :355-356). First chunk is pre-read via `__anext__` before `StreamingResponse` returns, so an immediate rejection surfaces as an HTTP error, not a broken stream. Exhausted `StopAsyncIteration` yields a synthetic `finish_reason="stop"` chunk (routes.py:367-380).
-- `# type: ignore[union-attr]` (routes.py:333) and `# type: ignore[arg-type]` (routes.py:388): flow-guaranteed non-None. Do not remove.
-
-## Token refresh (routes.py)
-
-- Constants: `REFRESH_LOCK_PATH` (:51, `/tmp/openwebui-proxy-refresh.lock`), `PROJECT_ROOT` (:52), `_REFRESH_SCRIPT` (:53, `playwright_login.py`), `_TOKEN_REJECTION_CODES` (:91, `{"invalid_issuer", "invalid_token", "token_expired"}`).
-- `_extract_error_code` (:94) pulls the code from upstream JSON. `_should_refresh_token` (:108) = token expired/invalid OR code in `_TOKEN_REJECTION_CODES`. A bare 401 is not enough.
-- `_trigger_refresh` (:119): non-blocking `fcntl.flock` + detached `subprocess.Popen` (`start_new_session=True`). Sidecar logs to `/tmp/sidecar.log`.
-- Four 401-refresh sites, each lazily imports `get_current_token`: models (:245-256), streaming create (:318-326), streaming first-chunk (:334-341), non-streaming (:412-419). Positive evidence: spawn sidecar, return 503. The client retries. The proxy never retries a 401 request itself.
-- KNOWN BUG (routes.py:139): fallback `script_path = "playwright-login.py"` uses a HYPHEN; the real file is `playwright_login.py` (underscore). Dead path, the fallback never resolves.
+- `_SSE_HEADERS` (`:31`: `Cache-Control: no-cache`, `X-Accel-Buffering: no`) — required on every `StreamingResponse` or SSE breaks behind nginx/Caddy. Duplicated at `../anthropic/routes.py:29`; keep in sync.
+- `_RETRY_BACKOFF_CAP` (`:36`, 120s). Duplicated at `../anthropic/routes.py:104`.
+- `_upstream_error_response` (`:44`) and `_token_expired_error_response` (`:51`) build OpenAI-format bodies via `errors.create_openai_error`.
+- `_refresh_for` (`:62`) is the only token logic left in this file: on a 401 it asks `auth.should_refresh(get_current_token(), exc.body)` and calls `auth.request_refresh()`. Positive evidence only — a bare 401 is not enough. Four call sites: models (`:161`), streaming create (`:238`), streaming first-chunk (`:249`), non-streaming (`:311`). Each returns **503**; the client retries, the proxy never retries a 401 itself.
+- Streaming retry (`_handle_streaming` `:220`): total attempts `1 + settings.stream_empty_retry_max`, backoff `min(1 << attempt, _RETRY_BACKOFF_CAP)`. 4xx short-circuits and is never retried. The first chunk is pre-read via `__anext__` before `StreamingResponse` returns, so an immediate rejection surfaces as an HTTP error rather than a broken stream. Exhausted `StopAsyncIteration` yields a synthetic `finish_reason="stop"` chunk. Rationale: [ADR-0003](../../../docs/adr/0003-streaming-retry-and-commit-semantics.md).
+- `models` (`:154`) reads the injected client directly: `request.app.state.models_client.get("/api/models")` then `raise_for_status()`. There is no `WebClient` wrapper any more, and no `app.state.web_client`.
+- `# type: ignore[union-attr]` and `# type: ignore[arg-type]` in the streaming path are flow-guaranteed non-None. Do not remove.
 
 ## translator.py
 
-- `rewrite_chat_body` (:410) is a SEVEN-pass pipeline in this exact order (order matters):
-  1. `_strip_unsupported_fields` (:380) drops `_UNSUPPORTED_FIELDS` (:329: `vector_store_ids`, `file_ids`).
-  2. `_strip_incompatible_thinking` (:289): reconciles a CLIENT-SUPPLIED `thinking` param with the target model. Non-Anthropic model -> the param is DROPPED (`thinking` is Anthropic-only and OWUI forwards unknown top-level params verbatim, so leaving it in causes upstream `400 unknown_parameter: 'thinking'`). Adaptive-only Anthropic family -> `type="enabled"` is COERCED to `{"type": "adaptive"}`, because those models reject enabled thinking with `400 "thinking.type.enabled" is not supported for this model`. A non-dict `thinking` on a Claude model is left untouched. Runs BEFORE `apply_thinking_params`, so the proxy's own suffix-derived injection stays authoritative.
-  3. `_strip_incompatible_reasoning_effort` (:359): for IDs matching `_REASONING_EFFORT_INCOMPATIBLE_RE` (:347, `gpt-5-6`), drops EVERY field in `_REASONING_CONTROL_FIELDS` (:349: `reasoning_effort`, `reasoning`, `effort`, `verbosity`, `textVerbosity`, `thinking`). This is an UPSTREAM DEFECT WORKAROUND, not a protocol rule. The gpt-5.6 line is served via **Bedrock Converse**, which accepts no reasoning/verbosity controls: `reasoning_effort` is remapped upstream onto the Anthropic-only `thinking` param (`400 unknown_parameter: 'thinking'`, though this proxy never sent it); `effort`/`textVerbosity` reach Bedrock verbatim and 400; `verbosity` trips `litellm.UnsupportedParamsError`. Verified: all 400 on gpt-5.6-sol/terra/luna, all 200 on claude-5-opus and gpt-oss-120b. CONSEQUENCE: reasoning depth is NOT controllable for gpt-5.6 on this gateway — it runs at default effort, silently. DELETE this pass once the upstream is fixed.
-  4. `_scrub_bedrock_tool_fields` (:247): drops legacy `functions`/`function_call`, coerces Bedrock-incompatible `tool_choice`, injects `_DUMMY_TOOL` when history references tools.
-  5. `_ensure_stream_usage` (:279): forces `stream_options.include_usage=true` when `stream` is true.
-  6. `_inject_chat_id` (:387): sets `chat_id="local:<uuid4>"`. Without it OWUI 0.9.x crashes (`NoneType.startswith`); the `local:` prefix makes OWUI skip DB persistence.
-  7. `_strip_session_id` (:399): removes `session_id` to prevent OWUI WebSocket multi-model fan-out (the proxy has no WS connection).
-- `sanitize_chat_body` (:422) is an alias of `rewrite_chat_body`.
-- Thinking constants: `EXTENDED_THINKING_CONFIG` (:21, 32k budget), `EXTENDED_THINKING_CONFIG_SMALL` (:22, 16k, Haiku), `ADAPTIVE_THINKING_CONFIG` (:23), `MIN_MAX_TOKENS_EXTENDED` (:25, 64k), `MIN_MAX_TOKENS_EXTENDED_SMALL` (:26, 32k).
-- `resolve_thinking_model` (:164) strips `:extended`/`:adaptive` and returns the config. `apply_thinking_params` (:199) injects `thinking` and raises `max_tokens` to the floor. A refused suffix is STILL stripped (returns `base`, config `None`) so the request does not 404 upstream on a synthetic model ID. On an adaptive-ONLY family, `:extended` resolves to `ADAPTIVE_THINKING_CONFIG` rather than an enabled budget — the suffix stays usable instead of guaranteeing a 400.
-- Model-family detection: `_normalize_model_id` (:47) lowercases and unifies `.`/`_`/`/` to `-`, so `anthropic.claude-x` and `bedrock_claude_x` agree. `_is_claude_model` (:91) is a positive allowlist over `_ANTHROPIC_FAMILY_TOKENS` (:57: `claude`, `fable`, `mythos`) — NOT "not OpenAI", because an unrecognised model must never receive a provider-specific param. OWUI's `GET /api/models` exposes no capability metadata, so ID matching is the only signal. Add new Anthropic families to that frozenset as they ship.
-- TWO adaptive gates, both derived from `_adaptive_capability` (:112) which returns a comparable version tuple (`(99, 99)` for the version-less `fable`/`mythos` lines, `(0, 0)` when thinking does not apply):
-  - `_supports_adaptive` (:102) — model ACCEPTS `type="adaptive"`. Opus/Sonnet >= 4.6 (`_ADAPTIVE_MIN_VERSION` :67). Enforced in BOTH `generate_thinking_variants` (:131) and `resolve_thinking_model` (:164). Claude 4.5 and earlier accept only `type="enabled"` and reject adaptive with `400 adaptive thinking is not supported on this model`.
-  - `_requires_adaptive` (:107) — model REJECTS `type="enabled"`. Opus/Sonnet >= 4.7 (`_ADAPTIVE_ONLY_MIN_VERSION` :73) plus `fable`/`mythos`.
-  - The 4.6/4.7 split is empirical, verified against genai.arizona.edu: `claude-4-6-opus` and `claude-4-6-sonnet` accept `type="enabled"` (200); `claude-5-opus` refuses it (400) and demands `adaptive` + `output_config.effort`. Do NOT collapse these two constants — 4.6 accepts BOTH modes, 4.7+ accepts only adaptive.
-- `_extract_version` (:83) bounds version digits to `\d{1,2}` so trailing date stamps (`...-4-6-20250514`) are not misread as versions.
+142 lines. Thinking variants and model-list translation only.
+
+- `generate_thinking_variants` (`:48`): appends `:extended` for any Anthropic family, plus `:adaptive` when `capabilities_for(id).supports_adaptive`.
+- `resolve_thinking_model` (`:74`): strips the suffix and returns the config. A refused suffix is STILL stripped (returns the base, config `None`) so the request does not 404 upstream on a synthetic model ID. On an adaptive-only family `:extended` resolves to `ADAPTIVE_THINKING_CONFIG` rather than an enabled budget, keeping the suffix usable instead of guaranteeing a 400.
+- `apply_thinking_params` (`:110`): injects `thinking` and raises `max_tokens` to a floor (`MIN_MAX_TOKENS_EXTENDED` 64k, `MIN_MAX_TOKENS_EXTENDED_SMALL` 32k for Haiku).
+- `translate_models_response` (`:126`): reshapes `GET /api/models` into `/v1/models` and appends variants per model.
+- Thinking configs: `EXTENDED_THINKING_CONFIG` (32k budget), `EXTENDED_THINKING_CONFIG_SMALL` (16k, Haiku), `ADAPTIVE_THINKING_CONFIG`.
+
+All family questions go through `capabilities_for()`. This module contains no regex, no version parsing, and no family token set.
 
 ## models.py
 
-- `OpenAIModel` (:10), `OpenAIModelList` (:19): `/v1/models` shapes. `translate_models_response` (translator.py:113) appends thinking variants per model.
-- `ThinkingConfig` (:26): `type` + optional `budget_tokens`.
+`OpenAIModel` (`:10`), `OpenAIModelList` (`:19`), `ThinkingConfig` (`:26`), `OpenAIErrorDetail` (`:33`), `OpenAIErrorResponse` (`:41`). The error shapes are consumed by `errors.py` in this package — `src/errors.py` no longer imports them.
+
+## Cross-package contract
+
+The Anthropic frontend imports two **public** symbols from this package: `resolve_thinking_model` and `apply_thinking_params` (`../anthropic/routes.py:22`). Changing either signature breaks that route. It imports nothing private.
+
+## Constraints
+
+- Adding an upstream parameter requires adding it to `SDK_KNOWN_PARAMS` (`../../open_webui/request_policy.py:29`) or it silently routes to `extra_body`.
+- This package must not format an Anthropic error, and the backend package must not format an OpenAI one.
+- Package tests: `tests/test_openai_translator.py` (95 tests, via the `src.translator` shim), `tests/test_openai_routes.py` (36 tests).

@@ -1,5 +1,7 @@
 services:
   proxy:
+    # Reap orphaned sidecar processes: uvicorn as PID 1 does not.
+    init: true
     build:
       context: .
       dockerfile: Dockerfile.playwright

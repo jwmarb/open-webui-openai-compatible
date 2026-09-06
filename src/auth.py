@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Final
@@ -163,6 +164,17 @@ def should_refresh(token: str | None, body: Any) -> bool:
     return extract_error_code(body) in _TOKEN_REJECTION_CODES
 
 
+def _reap(process: subprocess.Popen[bytes]) -> None:
+    """Wait on a detached sidecar so it does not linger as a zombie.
+
+    uvicorn runs as PID 1 in the container image and does not reap. A detached
+    Popen that is never waited on therefore accumulates zombies. Waiting on a
+    daemon thread keeps the event loop unblocked.
+    """
+    thread = threading.Thread(target=process.wait, daemon=True, name="sidecar-reaper")
+    thread.start()
+
+
 def request_refresh() -> bool:
     """Spawn the refresh sidecar, which owns the single-flight lock itself.
 
@@ -180,7 +192,7 @@ def request_refresh() -> bool:
         return False
 
     try:
-        subprocess.Popen(
+        process = subprocess.Popen(
             [sys.executable, str(REFRESH_SCRIPT)],
             stdout=log_handle,
             stderr=log_handle,
@@ -191,6 +203,8 @@ def request_refresh() -> bool:
         return False
     finally:
         log_handle.close()
+
+    _reap(process)
 
     logger.info("Token refresh sidecar spawned")
     return True

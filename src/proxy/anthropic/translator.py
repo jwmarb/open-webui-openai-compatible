@@ -328,8 +328,7 @@ class StreamingState:
         self.started = False
         self.input_tokens = 0
         self.output_tokens = 0
-        self._tool_block_index: dict[int, int] = {}
-        self._open_tool_indices: set[int] = set()
+        self._tool_calls: dict[int, dict[str, str]] = {}
         self._stop_reason: str | None = None
         self._finalized = False
 
@@ -377,11 +376,32 @@ class StreamingState:
         self.current_block_type = None
         return events
 
-    def _close_open_tool_blocks(self) -> list[dict[str, Any]]:
+    def _flush_tool_blocks(self) -> list[dict[str, Any]]:
+        """Emit each buffered tool call as a complete, non-interleaved block.
+
+        Anthropic requires a content block's index to equal its position in the
+        final content array, and clients accumulate deltas per open block, so
+        blocks must not overlap. Upstream interleaves tool-call fragments by
+        index, so they are buffered until the stream ends and then emitted one
+        block at a time.
+        """
         events: list[dict[str, Any]] = []
-        for tool_index in sorted(self._open_tool_indices):
-            events.append(self._content_block_stop(self._tool_block_index[tool_index]))
-        self._open_tool_indices.clear()
+        for tool_index in sorted(self._tool_calls):
+            call = self._tool_calls[tool_index]
+            events.append(self._content_block_start({
+                "type": "tool_use",
+                "id": call["id"],
+                "name": call["name"],
+                "input": {},
+            }, self.block_index))
+            if call["arguments"]:
+                events.append(self._content_block_delta({
+                    "type": "input_json_delta",
+                    "partial_json": call["arguments"],
+                }, self.block_index))
+            events.append(self._content_block_stop(self.block_index))
+            self.block_index += 1
+        self._tool_calls.clear()
         return events
 
     def _absorb_usage(self, chunk: dict[str, Any]) -> None:
@@ -450,40 +470,28 @@ class StreamingState:
 
         tool_calls = delta.get("tool_calls")
         if tool_calls:
-            events.extend(self._translate_tool_calls(tool_calls))
+            self._buffer_tool_calls(tool_calls)
 
         if finish_reason:
             self._stop_reason = _map_finish_reason(finish_reason)
 
         return events
 
-    def _translate_tool_calls(self, tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        events: list[dict[str, Any]] = []
-
+    def _buffer_tool_calls(self, tool_calls: list[dict[str, Any]]) -> None:
         for tc in tool_calls:
             tool_index = tc.get("index", 0)
             func = tc.get("function", {})
-
-            if tool_index not in self._tool_block_index:
-                events.extend(self._close_current_block())
-                self._tool_block_index[tool_index] = self.block_index
-                self._open_tool_indices.add(tool_index)
-                self.block_index += 1
-                events.append(self._content_block_start({
-                    "type": "tool_use",
-                    "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
-                    "name": func.get("name", ""),
-                    "input": {},
-                }, self._tool_block_index[tool_index]))
-
-            args_chunk = func.get("arguments", "")
-            if args_chunk:
-                events.append(self._content_block_delta({
-                    "type": "input_json_delta",
-                    "partial_json": args_chunk,
-                }, self._tool_block_index[tool_index]))
-
-        return events
+            call = self._tool_calls.setdefault(
+                tool_index,
+                {"id": "", "name": "", "arguments": ""},
+            )
+            if tc.get("id"):
+                call["id"] = tc["id"]
+            if func.get("name"):
+                call["name"] = func["name"]
+            call["arguments"] += func.get("arguments", "") or ""
+            if not call["id"]:
+                call["id"] = f"toolu_{uuid.uuid4().hex[:24]}"
 
     def finalize(self) -> list[dict[str, Any]]:
         """Emit the single terminal sequence. Safe to call more than once."""
@@ -495,7 +503,7 @@ class StreamingState:
         if not self.started:
             events.append(self._start_message_event())
         events.extend(self._close_current_block())
-        events.extend(self._close_open_tool_blocks())
+        events.extend(self._flush_tool_blocks())
         events.append({
             "type": "message_delta",
             "delta": {

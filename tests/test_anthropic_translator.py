@@ -494,7 +494,7 @@ class TestStreamingState:
                 "finish_reason": None,
             }],
         }
-        events = state.translate_chunk(chunk)
+        events = state.translate_chunk(chunk) + state.finalize()
         start_evt = next(e for e in events if e["type"] == "content_block_start")
         assert start_evt["content_block"]["type"] == "tool_use"
         assert start_evt["content_block"]["name"] == "search"
@@ -645,20 +645,17 @@ class TestStreamingStateParallelToolCalls:
 
     def test_parallel_tool_calls_get_distinct_block_indices(self):
         state = StreamingState(model="m")
-        events = state.translate_chunk(self._two_tool_chunk())
+        events = state.translate_chunk(self._two_tool_chunk()) + state.finalize()
         starts = [e for e in events if e["type"] == "content_block_start"]
         assert len(starts) == 2
         assert starts[0]["content_block"]["name"] == "get_weather"
         assert starts[1]["content_block"]["name"] == "get_time"
         assert starts[0]["index"] != starts[1]["index"]
 
-    def test_argument_deltas_carry_their_own_block_index(self):
+    def test_blocks_never_interleave(self):
         state = StreamingState(model="m")
-        start_events = state.translate_chunk(self._two_tool_chunk())
-        starts = {e["content_block"]["name"]: e["index"] for e in start_events
-                  if e["type"] == "content_block_start"}
-
-        events = state.translate_chunk({
+        events = state.translate_chunk(self._two_tool_chunk())
+        events += state.translate_chunk({
             "choices": [{
                 "index": 0,
                 "delta": {
@@ -667,13 +664,61 @@ class TestStreamingStateParallelToolCalls:
                         {"index": 0, "function": {"arguments": '{"city":"Tokyo"}'}},
                     ],
                 },
+                "finish_reason": "tool_calls",
+            }],
+        })
+        events += state.finalize()
+
+        open_index: int | None = None
+        for event in events:
+            if event["type"] == "content_block_start":
+                assert open_index is None
+                open_index = event["index"]
+            elif event["type"] == "content_block_delta":
+                assert event["index"] == open_index
+            elif event["type"] == "content_block_stop":
+                assert event["index"] == open_index
+                open_index = None
+        assert open_index is None
+
+    def test_block_indices_are_contiguous_from_zero(self):
+        state = StreamingState(model="m")
+        events = state.translate_chunk(self._two_tool_chunk()) + state.finalize()
+        starts = [e["index"] for e in events if e["type"] == "content_block_start"]
+        assert starts == list(range(len(starts)))
+
+    def test_argument_fragments_are_accumulated_per_tool(self):
+        state = StreamingState(model="m")
+        state.translate_chunk(self._two_tool_chunk())
+        state.translate_chunk({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [
+                        {"index": 1, "function": {"arguments": '{"city":'}},
+                        {"index": 0, "function": {"arguments": '{"city":"Tokyo"}'}},
+                    ],
+                },
                 "finish_reason": None,
             }],
         })
-        by_json = {e["delta"]["partial_json"]: e["index"] for e in events
-                   if e["type"] == "content_block_delta"}
-        assert by_json['{"city":"Tokyo"}'] == starts["get_weather"]
-        assert by_json['{"city":"Paris"}'] == starts["get_time"]
+        events = state.translate_chunk({
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [{"index": 1, "function": {"arguments": '"Paris"}'}}]},
+                "finish_reason": "tool_calls",
+            }],
+        }) + state.finalize()
+
+        by_name: dict[str, str] = {}
+        current: str | None = None
+        for event in events:
+            if event["type"] == "content_block_start":
+                current = event["content_block"].get("name")
+            elif event["type"] == "content_block_delta" and current:
+                by_name[current] = by_name.get(current, "") + event["delta"]["partial_json"]
+        assert by_name["get_weather"] == '{"city":"Tokyo"}'
+        assert by_name["get_time"] == '{"city":"Paris"}'
 
     def test_each_parallel_tool_block_is_closed_once(self):
         state = StreamingState(model="m")

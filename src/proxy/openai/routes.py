@@ -154,7 +154,9 @@ async def _stream_with_first(
 async def models(request: Request) -> JSONResponse:
     try:
         logger.debug("GET /v1/models — fetching upstream model list")
-        raw = await request.app.state.web_client.get_models()
+        response = await request.app.state.models_client.get("/api/models")
+        response.raise_for_status()
+        raw = response.json()
         translated = translate_models_response(raw)
         logger.debug("GET /v1/models — returning %d models",
                       len(translated.get("data", [])))

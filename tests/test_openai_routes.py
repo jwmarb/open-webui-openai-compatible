@@ -10,7 +10,8 @@ from openai.types.chat.chat_completion import Choice as CompletionChoice
 from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice
 from openai.types.chat.chat_completion_chunk import ChoiceDelta
 
-from src.main import app
+from src.main import create_app
+from tests.fakes import fake_clients
 
 _DUMMY_REQUEST = httpx.Request("POST", "/")
 
@@ -61,66 +62,42 @@ def _data_lines(response_text: str) -> list[str]:
     ]
 
 
-class MockChatCompletions:
-    def __init__(self, handler):
-        self._handler = handler
-
-    async def create(self, **kwargs):
-        return await self._handler(**kwargs)
-
-
-class MockChat:
-    def __init__(self, handler):
-        self.completions = MockChatCompletions(handler)
-
-
-class MockAsyncOpenAI:
-    def __init__(self, handler=None, **_kwargs):
-        self.chat = MockChat(handler or self._default_handler)
-
-    @staticmethod
-    async def _default_handler(**_kwargs):
-        return _completion()
-
-    async def close(self):
-        pass
-
-
-class MockWebClient:
-    def __init__(self, *_args, get_models=None, **_kwargs):
-        self._get_models = get_models
-
-    async def get_models(self) -> dict:
-        return await self._get_models()
-
-    async def aclose(self) -> None:
-        pass
-
-
 def _make_mock_webclient(get_models=None):
-    return MockWebClient(get_models=get_models)
+    return get_models
 
 
 def _default_webclient():
-    async def noop():
-        return {"data": []}
-    return _make_mock_webclient(get_models=noop)
+    return None
+
+
+class _AppFactory:
+    """Stands in for the old dual-patch pair; injects fakes via create_app()."""
+
+    def __init__(self, openai_handler=None, models_source=None) -> None:
+        self._handler = openai_handler
+        self._models_source = models_source
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def build(self):
+        return create_app(clients=fake_clients(
+            openai_handler=self._handler, models_source=self._models_source))
 
 
 def _patches(*, openai_handler=None, webclient=None):
-    wc = webclient or _default_webclient()
-    oa = MockAsyncOpenAI(handler=openai_handler)
-    return (
-        patch("src.main.WebClient", return_value=wc),
-        patch("src.main.openai.AsyncOpenAI", return_value=oa),
-    )
+    factory = _AppFactory(openai_handler=openai_handler, models_source=webclient)
+    return factory, factory
 
 
 class TestHealth:
     def test_health(self):
         p_wc, p_oa = _patches()
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.get("/health")
                 assert response.status_code == 200
                 assert response.json() == {"status": "ok"}
@@ -141,7 +118,7 @@ class TestModelsEndpoint:
         p_wc, p_oa = _patches(webclient=wc)
 
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.get("/v1/models")
                 assert response.status_code == 200
                 body = response.json()
@@ -160,7 +137,7 @@ class TestModelsEndpoint:
         p_wc, p_oa = _patches(webclient=wc)
 
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.get("/v1/models")
                 assert response.status_code == 502
                 body = response.json()
@@ -175,7 +152,7 @@ class TestModelsEndpoint:
         p_wc, p_oa = _patches(webclient=wc)
 
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.get("/v1/models")
                 assert response.status_code == 502
                 body = response.json()
@@ -190,7 +167,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "llama-3.1", "messages": [{"role": "user", "content": "Hi"}]},
@@ -210,7 +187,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "llama-3.1", "messages": [{"role": "user", "content": "Hi"}]},
@@ -234,7 +211,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={
@@ -257,7 +234,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={
@@ -280,7 +257,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
@@ -300,7 +277,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
@@ -320,7 +297,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
@@ -339,7 +316,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
@@ -354,7 +331,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
@@ -370,7 +347,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
@@ -386,7 +363,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
@@ -404,7 +381,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
@@ -422,7 +399,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "bedrock-claude-4-6-opus:extended", "messages": [{"role": "user", "content": "Hi"}]},
@@ -443,7 +420,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={
@@ -467,7 +444,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={
@@ -489,7 +466,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={
@@ -511,7 +488,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={
@@ -538,7 +515,7 @@ class TestChatCompletionsEndpoint:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post("/v1/chat/completions", json={})
                 assert response.status_code == 200
                 extra = captured.get("extra_body")
@@ -561,7 +538,7 @@ class TestModelsThinkingVariants:
         p_wc, p_oa = _patches(webclient=wc)
 
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.get("/v1/models")
                 assert response.status_code == 200
                 ids = [m["id"] for m in response.json()["data"]]
@@ -591,7 +568,7 @@ class TestErrorResponseShape:
 
             p_wc, p_oa = _patches(openai_handler=make_raiser)
             with p_wc, p_oa:
-                with TestClient(app) as tc:
+                with TestClient(p_wc.build()) as tc:
                     response = tc.post(
                         "/v1/chat/completions",
                         json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
@@ -605,7 +582,7 @@ class TestErrorResponseShape:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
@@ -618,7 +595,7 @@ class TestErrorResponseShape:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
@@ -631,7 +608,7 @@ class TestErrorResponseShape:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
@@ -648,7 +625,7 @@ class TestErrorResponseShape:
         p_wc, p_oa = _patches(webclient=wc)
 
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.get("/v1/models")
                 self._assert_openai_error_shape(response.json())
 
@@ -660,7 +637,7 @@ class TestErrorResponseShape:
         p_wc, p_oa = _patches(webclient=wc)
 
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.get("/v1/models")
                 self._assert_openai_error_shape(response.json())
 
@@ -673,7 +650,7 @@ class TestErrorResponseShape:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
@@ -705,7 +682,7 @@ class TestStreamEmptyRetry:
         with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 3
             mock_settings.log_level = "WARNING"
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
@@ -730,7 +707,7 @@ class TestStreamEmptyRetry:
         with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 2
             mock_settings.log_level = "WARNING"
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
@@ -757,7 +734,7 @@ class TestStreamEmptyRetry:
         with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 0
             mock_settings.log_level = "WARNING"
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
@@ -780,7 +757,7 @@ class TestStreamEmptyRetry:
         with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 3
             mock_settings.log_level = "WARNING"
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
@@ -803,7 +780,7 @@ class TestStreamEmptyRetry:
         with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 3
             mock_settings.log_level = "WARNING"
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
@@ -831,7 +808,7 @@ class TestStreamEmptyRetry:
         with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 3
             mock_settings.log_level = "WARNING"
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/chat/completions",
                     json={"model": "nonexistent", "messages": [{"role": "user", "content": "Hi"}], "stream": True},

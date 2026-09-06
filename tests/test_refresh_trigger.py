@@ -6,7 +6,7 @@ import json
 import os
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import jwt
 import openai
@@ -14,6 +14,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.auth import should_refresh
+from src.main import create_app
+from tests.fakes import fake_clients
+
+
+def _app_with(handler):
+    return create_app(clients=fake_clients(openai_handler=handler))
 
 
 def _make_jwt(exp_offset_seconds: int) -> str:
@@ -31,27 +37,6 @@ def token_file(tmp_path: Path) -> Path:
 def mock_settings_env(monkeypatch: pytest.MonkeyPatch, token_file: Path):
     monkeypatch.setenv("TOKEN_FILE", str(token_file))
     monkeypatch.delenv("USER_TOKEN", raising=False)
-
-
-class MockAsyncOpenAI:
-    def __init__(self, handler=None):
-        self.chat = MagicMock()
-        self.chat.completions = MagicMock()
-        self.chat.completions.create = handler or AsyncMock()
-
-    async def close(self):
-        pass
-
-
-class MockWebClient:
-    def __init__(self, *_args, get_models=None, **_kwargs):
-        self._get_models = get_models
-
-    async def get_models(self):
-        return await self._get_models() if self._get_models else {"data": []}
-
-    async def aclose(self):
-        pass
 
 
 @pytest.fixture
@@ -83,16 +68,8 @@ class TestRefreshTriggerOn401:
                 body=None,
             )
 
-        wc = MockWebClient()
-        oa = MockAsyncOpenAI(handler=mock_create)
-
-        with (
-            patch("src.main.WebClient", return_value=wc),
-            patch("src.main.openai.AsyncOpenAI", return_value=oa),
-            patch("src.proxy.openai.routes.request_refresh") as mock_trigger,
-        ):
-            from src.main import app
-            with TestClient(app) as client:
+        with patch("src.proxy.openai.routes.request_refresh") as mock_trigger:
+            with TestClient(_app_with(mock_create)) as client:
                 resp = client.post(
                     "/v1/chat/completions",
                     json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
@@ -115,16 +92,8 @@ class TestRefreshTriggerOn401:
                 body=None,
             )
 
-        wc = MockWebClient()
-        oa = MockAsyncOpenAI(handler=mock_create)
-
-        with (
-            patch("src.main.WebClient", return_value=wc),
-            patch("src.main.openai.AsyncOpenAI", return_value=oa),
-            patch("src.proxy.openai.routes.request_refresh") as mock_trigger,
-        ):
-            from src.main import app
-            with TestClient(app) as client:
+        with patch("src.proxy.openai.routes.request_refresh") as mock_trigger:
+            with TestClient(_app_with(mock_create)) as client:
                 resp = client.post(
                     "/v1/chat/completions",
                     json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
@@ -145,16 +114,8 @@ class TestRefreshTriggerOn401:
                 body=None,
             )
 
-        wc = MockWebClient()
-        oa = MockAsyncOpenAI(handler=mock_create)
-
-        with (
-            patch("src.main.WebClient", return_value=wc),
-            patch("src.main.openai.AsyncOpenAI", return_value=oa),
-            patch("src.proxy.openai.routes.request_refresh") as mock_trigger,
-        ):
-            from src.main import app
-            with TestClient(app) as client:
+        with patch("src.proxy.openai.routes.request_refresh") as mock_trigger:
+            with TestClient(_app_with(mock_create)) as client:
                 resp = client.post(
                     "/v1/chat/completions",
                     json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": False},
@@ -178,6 +139,7 @@ class TestRefreshLock:
         def fake_popen(*args, **kwargs):
             nonlocal sidecar_called
             sidecar_called = True
+            return MagicMock()
 
         with patch("src.auth.REFRESH_LOCK_PATH", lock_path):
             with patch("subprocess.Popen", fake_popen):
@@ -284,3 +246,24 @@ class TestAtomicTokenWrite:
 
         assert json.loads(target.read_text())["token"] == "second-token"
         assert target.stat().st_ino != original_inode
+
+
+class TestSidecarReaping:
+    def test_spawned_sidecar_is_waited_on(self, tmp_path: Path):
+        waited: list[bool] = []
+
+        class FakeProc:
+            def wait(self):
+                waited.append(True)
+                return 0
+
+        with patch("src.auth.REFRESH_LOCK_PATH", tmp_path / "l.lock"):
+            with patch("subprocess.Popen", lambda *a, **k: FakeProc()):
+                from src.auth import request_refresh
+                assert request_refresh() is True
+
+        for _ in range(200):
+            if waited:
+                break
+            time.sleep(0.01)
+        assert waited == [True]

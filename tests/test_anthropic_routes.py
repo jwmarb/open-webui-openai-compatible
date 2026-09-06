@@ -11,7 +11,8 @@ from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice
 from openai.types.chat.chat_completion_chunk import ChoiceDelta
 from openai.types.completion_usage import CompletionUsage
 
-from src.main import app
+from src.main import create_app
+from tests.fakes import fake_clients
 
 _DUMMY_REQUEST = httpx.Request("POST", "/")
 
@@ -107,49 +108,25 @@ def _parse_sse_events(response_text: str) -> list[dict]:
     return events
 
 
-class MockChatCompletions:
-    def __init__(self, handler):
-        self._handler = handler
+class _AppFactory:
+    """Stands in for the old dual-patch pair; injects fakes via create_app()."""
 
-    async def create(self, **kwargs):
-        return await self._handler(**kwargs)
+    def __init__(self, openai_handler=None) -> None:
+        self._handler = openai_handler
 
+    def __enter__(self):
+        return self
 
-class MockChat:
-    def __init__(self, handler):
-        self.completions = MockChatCompletions(handler)
+    def __exit__(self, *exc):
+        return False
 
-
-class MockAsyncOpenAI:
-    def __init__(self, handler=None, **_kwargs):
-        self.chat = MockChat(handler or self._default_handler)
-
-    @staticmethod
-    async def _default_handler(**_kwargs):
-        return _completion()
-
-    async def close(self):
-        pass
-
-
-class MockWebClient:
-    def __init__(self, *_args, **_kwargs):
-        pass
-
-    async def get_models(self) -> dict:
-        return {"data": []}
-
-    async def aclose(self) -> None:
-        pass
+    def build(self):
+        return create_app(clients=fake_clients(openai_handler=self._handler))
 
 
 def _patches(*, openai_handler=None):
-    wc = MockWebClient()
-    oa = MockAsyncOpenAI(handler=openai_handler)
-    return (
-        patch("src.main.WebClient", return_value=wc),
-        patch("src.main.openai.AsyncOpenAI", return_value=oa),
-    )
+    factory = _AppFactory(openai_handler=openai_handler)
+    return factory, factory
 
 
 class TestMessagesThinkingGate:
@@ -164,7 +141,7 @@ class TestMessagesThinkingGate:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -187,7 +164,7 @@ class TestMessagesThinkingGate:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -209,7 +186,7 @@ class TestMessagesNonStreaming:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -248,7 +225,7 @@ class TestMessagesNonStreaming:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -274,7 +251,7 @@ class TestMessagesNonStreaming:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 tc.post(
                     "/v1/messages",
                     json={
@@ -295,7 +272,7 @@ class TestMessagesNonStreaming:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 tc.post(
                     "/v1/messages",
                     json={
@@ -321,7 +298,7 @@ class TestMessagesStreaming:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -350,7 +327,7 @@ class TestMessagesStreaming:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -375,7 +352,7 @@ class TestMessagesStreaming:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -398,7 +375,7 @@ class TestMessagesStreaming:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -421,7 +398,7 @@ class TestMessagesStreaming:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -446,7 +423,7 @@ class TestMessagesStreaming:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -474,7 +451,7 @@ class TestMessagesStreaming:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa, patch("src.proxy.anthropic.routes.settings", mock_settings):
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -499,7 +476,7 @@ class TestMessagesStreaming:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -529,7 +506,7 @@ class TestMessagesStreaming:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -544,10 +521,21 @@ class TestMessagesStreaming:
                           for e in events if e["event"] == "content_block_start"}
                 assert starts["get_weather"] != starts["get_time"]
 
-                deltas = {e["data"]["delta"]["partial_json"]: e["data"]["index"]
-                          for e in events if e["event"] == "content_block_delta"}
-                assert deltas['{"c":"Tokyo"}'] == starts["get_weather"]
-                assert deltas['{"c":"Paris"}'] == starts["get_time"]
+                open_index = None
+                pairs: dict[int, str] = {}
+                for e in events:
+                    if e["event"] == "content_block_start":
+                        assert open_index is None
+                        open_index = e["data"]["index"]
+                    elif e["event"] == "content_block_delta":
+                        assert e["data"]["index"] == open_index
+                        pairs[open_index] = pairs.get(open_index, "") + e["data"]["delta"]["partial_json"]
+                    elif e["event"] == "content_block_stop":
+                        assert e["data"]["index"] == open_index
+                        open_index = None
+                assert open_index is None
+                assert pairs[starts["get_weather"]] == '{"c":"Tokyo"}'
+                assert pairs[starts["get_time"]] == '{"c":"Paris"}'
 
                 stop_indices = [e["data"]["index"] for e in events
                                 if e["event"] == "content_block_stop"]
@@ -567,7 +555,7 @@ class TestMessagesErrors:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -588,7 +576,7 @@ class TestMessagesErrors:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -608,7 +596,7 @@ class TestMessagesErrors:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -634,7 +622,7 @@ class TestMessagesErrors:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -657,7 +645,7 @@ class TestMessagesErrors:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -684,7 +672,7 @@ class TestMessagesThinkingSuffix:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 tc.post(
                     "/v1/messages",
                     json={
@@ -707,7 +695,7 @@ class TestMessagesThinkingSuffix:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 tc.post(
                     "/v1/messages",
                     json={
@@ -728,7 +716,7 @@ class TestMessagesThinkingSuffix:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 tc.post(
                     "/v1/messages",
                     json={
@@ -761,7 +749,7 @@ class TestMessagesTokenRefresh:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa, patch("src.proxy.anthropic.routes.request_refresh") as mock_refresh:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
@@ -792,7 +780,7 @@ class TestMessagesTokenRefresh:
 
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa, patch("src.proxy.anthropic.routes.request_refresh") as mock_refresh:
-            with TestClient(app) as tc:
+            with TestClient(p_wc.build()) as tc:
                 response = tc.post(
                     "/v1/messages",
                     json={
