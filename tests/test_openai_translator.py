@@ -220,17 +220,88 @@ class TestStripIncompatibleThinking:
         assert "thinking" not in result
 
     def test_preserves_reasoning_effort_for_openai_model(self):
-        body = {"model": "openai.gpt-5.6-luna", "messages": [], "reasoning_effort": "high"}
+        body = {"model": "openai.gpt-5.4-nano", "messages": [], "reasoning_effort": "high"}
         result = rewrite_chat_body(body)
         assert result["reasoning_effort"] == "high"
 
+    def test_strips_reasoning_effort_for_gpt_5_6(self):
+        """Upstream maps reasoning_effort onto Bedrock's Anthropic-only ``thinking``
+        param for the gpt-5.6 line, so the request dies with
+        400 ``unknown_parameter: 'thinking'`` even though the proxy never sent it.
+        """
+        for model in ("openai.gpt-5.6-sol", "openai.gpt-5.6-terra", "openai.gpt-5.6-luna"):
+            body = {"model": model, "messages": [], "reasoning_effort": "xhigh"}
+            result = rewrite_chat_body(body)
+            assert "reasoning_effort" not in result, model
 
+    def test_preserves_reasoning_effort_for_gpt_oss(self):
+        body = {"model": "openai.gpt-oss-120b-1:0", "messages": [], "reasoning_effort": "high"}
+        result = rewrite_chat_body(body)
+        assert result["reasoning_effort"] == "high"
 
+    def test_preserves_reasoning_effort_for_claude(self):
+        body = {"model": "bedrock-claude-5-opus", "messages": [], "reasoning_effort": "high"}
+        result = rewrite_chat_body(body)
+        assert result["reasoning_effort"] == "high"
 
+    def test_reasoning_effort_strip_does_not_mutate_original(self):
+        body = {"model": "openai.gpt-5.6-sol", "messages": [], "reasoning_effort": "high"}
+        rewrite_chat_body(body)
+        assert body["reasoning_effort"] == "high"
 
+    def test_strips_all_reasoning_controls_for_gpt_5_6(self):
+        body = {
+            "model": "openai.gpt-5.6-sol",
+            "messages": [],
+            "reasoning_effort": "xhigh",
+            "reasoning": {"effort": "high"},
+            "effort": "high",
+            "verbosity": "low",
+            "textVerbosity": "low",
+            "thinking": {"type": "enabled"},
+        }
+        result = rewrite_chat_body(body)
+        for field in ("reasoning_effort", "reasoning", "effort", "verbosity", "textVerbosity", "thinking"):
+            assert field not in result, field
+        assert result["model"] == "openai.gpt-5.6-sol"
 
+    def test_preserves_reasoning_controls_for_claude(self):
+        body = {
+            "model": "bedrock-claude-5-opus",
+            "messages": [],
+            "reasoning_effort": "high",
+            "verbosity": "low",
+        }
+        result = rewrite_chat_body(body)
+        assert result["reasoning_effort"] == "high"
+        assert result["verbosity"] == "low"
 
+    def test_preserves_reasoning_controls_for_gpt_oss(self):
+        body = {
+            "model": "openai.gpt-oss-120b-1:0",
+            "messages": [],
+            "reasoning_effort": "high",
+            "verbosity": "low",
+        }
+        result = rewrite_chat_body(body)
+        assert result["reasoning_effort"] == "high"
+        assert result["verbosity"] == "low"
 
+    def test_gpt_5_6_strip_leaves_core_params_intact(self):
+        body = {
+            "model": "openai.gpt-5.6-terra",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": 2000,
+            "reasoning_effort": "xhigh",
+            "stream": True,
+            "temperature": 0.5,
+        }
+        result = rewrite_chat_body(body)
+        assert "reasoning_effort" not in result
+        assert result["max_completion_tokens"] == 2000
+        assert result["stream"] is True
+        assert result["temperature"] == 0.5
+        assert result["messages"] == [{"role": "user", "content": "hi"}]
 
     def test_does_not_mutate_original(self):
         body = {"model": "gpt-4o", "messages": [], "thinking": {"type": "enabled"}}

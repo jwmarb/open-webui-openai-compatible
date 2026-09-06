@@ -333,6 +333,50 @@ _UNSUPPORTED_FIELDS: frozenset[str] = frozenset(
     }
 )
 
+# The gpt-5.6 line is served through Bedrock Converse, which accepts NO reasoning or
+# verbosity controls at all. Two separate upstream behaviours bite here:
+#   * `reasoning_effort` is remapped by genai.arizona.edu's own LiteLLM onto Bedrock's
+#     Anthropic-only `thinking` param -> 400 `unknown_parameter: 'thinking'`, even
+#     though this proxy never sends `thinking`.
+#   * `effort` / `textVerbosity` reach Bedrock verbatim -> 400 `unknown_parameter`,
+#     and `verbosity` trips `litellm.UnsupportedParamsError` for the Converse route.
+# Verified against genai.arizona.edu: every field below 400s on gpt-5.6-sol/terra/luna
+# and 200s on claude-5-opus and gpt-oss-120b, so the strip is scoped to this family.
+# Reasoning depth is therefore NOT controllable for gpt-5.6 on this gateway; the model
+# runs at its default effort. Re-check when the upstream is fixed.
+_REASONING_EFFORT_INCOMPATIBLE_RE = re.compile(r"gpt-5-6")
+
+_REASONING_CONTROL_FIELDS: tuple[str, ...] = (
+    "reasoning_effort",
+    "reasoning",
+    "effort",
+    "verbosity",
+    "textVerbosity",
+    "thinking",
+)
+
+
+def _strip_incompatible_reasoning_effort(body: dict[str, Any]) -> dict[str, Any]:
+    """Drop every reasoning/verbosity control for models whose upstream rejects them."""
+    model = body.get("model", "")
+    if not _REASONING_EFFORT_INCOMPATIBLE_RE.search(_normalize_model_id(model)):
+        return body
+
+    dropped = [field for field in _REASONING_CONTROL_FIELDS if field in body]
+    if not dropped:
+        return body
+
+    for field in dropped:
+        body.pop(field, None)
+    logger.warning(
+        "Stripped %s for %r: this family is served via Bedrock Converse, which "
+        "rejects reasoning and verbosity controls (depth stays at the default)",
+        ", ".join(repr(field) for field in dropped),
+        model,
+    )
+    return body
+
+
 def _strip_unsupported_fields(body: dict[str, Any]) -> dict[str, Any]:
     """Remove fields that upstream providers (e.g. Bedrock) reject as extra inputs."""
     for field in _UNSUPPORTED_FIELDS:
@@ -367,6 +411,7 @@ def rewrite_chat_body(body: dict[str, Any]) -> dict[str, Any]:
     rewritten = {**body}
     rewritten = _strip_unsupported_fields(rewritten)
     rewritten = _strip_incompatible_thinking(rewritten)
+    rewritten = _strip_incompatible_reasoning_effort(rewritten)
     rewritten = _scrub_bedrock_tool_fields(rewritten)
     rewritten = _ensure_stream_usage(rewritten)
     rewritten = _inject_chat_id(rewritten)
