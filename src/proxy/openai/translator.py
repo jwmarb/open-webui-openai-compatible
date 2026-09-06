@@ -65,6 +65,12 @@ _ANTHROPIC_FAMILY_TOKENS: frozenset[str] = frozenset({
 # not supported on this model", so this is an allowlist of known-capable families
 # rather than the previous "everything except Haiku".
 _ADAPTIVE_MIN_VERSION: tuple[int, int] = (4, 6)
+# Opus/Sonnet 4.7+ (and Fable/Mythos) go further than merely *accepting* adaptive:
+# they REJECT thinking.type="enabled" with 400 '"thinking.type.enabled" is not
+# supported for this model. Use "thinking.type.adaptive" and
+# "output_config.effort"'. Verified against genai.arizona.edu: claude-4-6-opus and
+# claude-4-6-sonnet accept "enabled" (200), claude-5-opus refuses it (400).
+_ADAPTIVE_ONLY_MIN_VERSION: tuple[int, int] = (4, 7)
 _ADAPTIVE_CAPABLE_LINES: frozenset[str] = frozenset({"opus", "sonnet"})
 _ADAPTIVE_ALWAYS_CAPABLE: frozenset[str] = frozenset({"fable", "mythos"})
 
@@ -95,18 +101,31 @@ def _is_small_context_claude(model_id: str) -> bool:
 
 def _supports_adaptive(model_id: str) -> bool:
     """True only for Anthropic families documented to accept ``type="adaptive"``."""
+    return _adaptive_capability(model_id) >= _ADAPTIVE_MIN_VERSION
+
+
+def _requires_adaptive(model_id: str) -> bool:
+    """True for families that reject ``type="enabled"`` and accept only adaptive."""
+    return _adaptive_capability(model_id) >= _ADAPTIVE_ONLY_MIN_VERSION
+
+
+def _adaptive_capability(model_id: str) -> tuple[int, int]:
+    """Version used for adaptive gating; ``(0, 0)`` when thinking does not apply.
+
+    Fable/Mythos carry no version digits but share the newest request surface, so
+    they report a version above every numeric gate.
+    """
     if not _is_claude_model(model_id):
-        return False
+        return (0, 0)
 
     normalized = _normalize_model_id(model_id)
     if any(token in normalized for token in _ADAPTIVE_ALWAYS_CAPABLE):
-        return True
+        return (99, 99)
 
     if not any(line in normalized for line in _ADAPTIVE_CAPABLE_LINES):
-        return False
+        return (0, 0)
 
-    version = _extract_version(normalized)
-    return version is not None and version >= _ADAPTIVE_MIN_VERSION
+    return _extract_version(normalized) or (0, 0)
 
 
 def generate_thinking_variants(model: OpenAIModel) -> list[OpenAIModel]:
@@ -162,6 +181,14 @@ def resolve_thinking_model(model: str) -> tuple[str, ThinkingConfig | None]:
                 suffix, base,
             )
             return base, None
+        return base, ADAPTIVE_THINKING_CONFIG
+
+    if _requires_adaptive(base):
+        logger.info(
+            "Mapping %s suffix on %r to adaptive thinking: this family rejects "
+            "thinking.type='enabled' and requires adaptive + output_config.effort",
+            suffix, base,
+        )
         return base, ADAPTIVE_THINKING_CONFIG
 
     if _is_small_context_claude(base):
@@ -260,27 +287,42 @@ def _ensure_stream_usage(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _strip_incompatible_thinking(body: dict[str, Any]) -> dict[str, Any]:
-    """Drop a client-supplied ``thinking`` param when the target model cannot accept it.
+    """Reconcile a client-supplied ``thinking`` param with what the model accepts.
 
     ``thinking`` is Anthropic-only. Open WebUI forwards unknown top-level params
     verbatim on non-Azure OpenAI connections, so sending it to an OpenAI-family
     model reaches the provider and hard-fails with
-    400 ``unknown_parameter: 'thinking'``. Stripping keeps the request usable
-    instead of turning a recoverable call into a retry loop.
+    400 ``unknown_parameter: 'thinking'``, so it is dropped. Adaptive-only Claude
+    families reject ``type="enabled"`` just as hard, so that is coerced to
+    adaptive. Both keep the request usable instead of turning a recoverable call
+    into a retry loop.
     """
     if "thinking" not in body:
         return body
 
     model = body.get("model", "")
-    if _is_claude_model(model):
+    if not _is_claude_model(model):
+        body.pop("thinking", None)
+        logger.warning(
+            "Stripped client-supplied 'thinking' param for non-Anthropic model %r "
+            "(parameter is Anthropic-only and would be rejected upstream)",
+            model,
+        )
         return body
 
-    body.pop("thinking", None)
-    logger.warning(
-        "Stripped client-supplied 'thinking' param for non-Anthropic model %r "
-        "(parameter is Anthropic-only and would be rejected upstream)",
-        model,
-    )
+    thinking = body.get("thinking")
+    if (
+        _requires_adaptive(model)
+        and isinstance(thinking, dict)
+        and thinking.get("type") == "enabled"
+    ):
+        body["thinking"] = ADAPTIVE_THINKING_CONFIG.model_dump(exclude_none=True)
+        logger.warning(
+            "Coerced client-supplied thinking.type='enabled' to 'adaptive' for %r "
+            "(family rejects enabled thinking; use output_config.effort for depth)",
+            model,
+        )
+
     return body
 
 
@@ -290,7 +332,6 @@ _UNSUPPORTED_FIELDS: frozenset[str] = frozenset(
         "file_ids",
     }
 )
-
 
 def _strip_unsupported_fields(body: dict[str, Any]) -> dict[str, Any]:
     """Remove fields that upstream providers (e.g. Bedrock) reject as extra inputs."""

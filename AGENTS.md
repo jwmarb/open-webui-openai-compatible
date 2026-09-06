@@ -146,7 +146,7 @@ When adding a **required** settings field, update `tests/conftest.py` and the CI
 ## Request flow
 
 1. Client sends an OpenAI-compatible request (or an Anthropic one, which `translate_request()` converts first).
-2. `rewrite_chat_body()` runs **six ordered passes**: strip unsupported fields → incompatible-`thinking` stripping → Bedrock tool scrubbing → stream-usage injection → `chat_id` injection → `session_id` stripping. Details in `src/proxy/openai/AGENTS.md`.
+2. `rewrite_chat_body()` runs **six ordered passes**: strip unsupported fields → incompatible-`thinking` reconciliation → Bedrock tool scrubbing → stream-usage injection → `chat_id` injection → `session_id` stripping. Details in `src/proxy/openai/AGENTS.md`.
 3. `resolve_thinking_model()` strips any `:extended`/`:adaptive` suffix and returns a thinking config (only for Anthropic models that support it; the suffix is stripped either way).
 4. `apply_thinking_params()` injects `thinking` and raises `max_tokens` to a sufficient floor.
 5. `_split_body_for_sdk()` splits fields into SDK kwargs vs `extra_body` using `_SDK_KNOWN_PARAMS`.
@@ -171,7 +171,16 @@ Error mapping: `APIStatusError` → preserve status · `APITimeoutError` → 504
 
 Models from an Anthropic family (`claude`, `fable`, `mythos` in the ID) get virtual variants appended to `/v1/models`: `:extended` (`thinking.type=enabled`, 32k budget / 16k Haiku) and `:adaptive` (`thinking.type=adaptive`, only for Opus/Sonnet >= 4.6 and the `fable`/`mythos` families — Claude 4.5 and earlier reject adaptive upstream). The suffix is stripped before forwarding, including when the variant is refused.
 
-A client-supplied `thinking` param is stripped for non-Anthropic models. It is Anthropic-only, and Open WebUI forwards unknown top-level params verbatim, so leaving it in produces upstream `400 unknown_parameter: 'thinking'`. `reasoning_effort` is passed through untouched — Open WebUI supports it natively and LiteLLM translates it across providers.
+Two distinct capability gates, and they are NOT the same line:
+
+| Gate | Meaning | Applies to |
+| --- | --- | --- |
+| `_supports_adaptive` | model ACCEPTS `type="adaptive"` | Opus/Sonnet >= 4.6, `fable`, `mythos` |
+| `_requires_adaptive` | model REJECTS `type="enabled"` | Opus/Sonnet >= **4.7**, `fable`, `mythos` |
+
+Claude 4.6 accepts BOTH modes; Claude 4.7+ accepts ONLY adaptive, failing enabled thinking with `400 "thinking.type.enabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort"`. Verified against genai.arizona.edu: `claude-4-6-opus`/`claude-4-6-sonnet` -> 200, `claude-5-opus` -> 400. Consequently `:extended` on an adaptive-only family resolves to the ADAPTIVE config, so the variant stays usable instead of guaranteeing a 400.
+
+A client-supplied `thinking` param is stripped for non-Anthropic models. It is Anthropic-only, and Open WebUI forwards unknown top-level params verbatim, so leaving it in produces upstream `400 unknown_parameter: 'thinking'`. On adaptive-only Anthropic models a client-supplied `type="enabled"` is coerced to `{"type": "adaptive"}` for the same reason. `reasoning_effort` is passed through untouched — Open WebUI supports it natively and LiteLLM translates it across providers.
 
 ## Conventions
 

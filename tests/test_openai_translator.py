@@ -224,6 +224,14 @@ class TestStripIncompatibleThinking:
         result = rewrite_chat_body(body)
         assert result["reasoning_effort"] == "high"
 
+
+
+
+
+
+
+
+
     def test_does_not_mutate_original(self):
         body = {"model": "gpt-4o", "messages": [], "thinking": {"type": "enabled"}}
         rewrite_chat_body(body)
@@ -233,6 +241,57 @@ class TestStripIncompatibleThinking:
         body = {"model": "openai.gpt-5.6-luna", "messages": []}
         result = rewrite_chat_body(body)
         assert "thinking" not in result
+
+    def test_coerces_enabled_to_adaptive_for_adaptive_only_model(self):
+        body = {
+            "model": "bedrock-claude-5-opus",
+            "messages": [],
+            "thinking": {"type": "enabled", "budget_tokens": 10000},
+        }
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == {"type": "adaptive"}
+
+    def test_coerces_enabled_to_adaptive_for_adaptive_only_sonnet(self):
+        body = {
+            "model": "bedrock-claude-5-sonnet",
+            "messages": [],
+            "thinking": {"type": "enabled", "budget_tokens": 32000},
+        }
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == {"type": "adaptive"}
+
+    def test_preserves_adaptive_for_adaptive_only_model(self):
+        body = {"model": "bedrock-claude-5-opus", "messages": [], "thinking": {"type": "adaptive"}}
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == {"type": "adaptive"}
+
+    def test_does_not_mutate_original_on_coercion(self):
+        body = {
+            "model": "bedrock-claude-5-opus",
+            "messages": [],
+            "thinking": {"type": "enabled", "budget_tokens": 10000},
+        }
+        rewrite_chat_body(body)
+        assert body["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+
+    def test_preserves_enabled_for_claude_4_6(self):
+        body = {
+            "model": "bedrock-claude-4-6-opus",
+            "messages": [],
+            "thinking": {"type": "enabled", "budget_tokens": 10000},
+        }
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+
+    def test_coerces_enabled_for_fable(self):
+        body = {"model": "claude-fable-5", "messages": [], "thinking": {"type": "enabled"}}
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == {"type": "adaptive"}
+
+    def test_leaves_non_dict_thinking_untouched_for_claude(self):
+        body = {"model": "bedrock-claude-5-opus", "messages": [], "thinking": "enabled"}
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == "enabled"
 
 
 class TestGenerateThinkingVariants:
@@ -311,6 +370,43 @@ class TestResolveThinkingModel:
         assert base == "bedrock-claude-4-5-haiku"
         assert config is not None
         assert config.budget_tokens == 16000
+
+    def test_adaptive_only_model_extended_downgrades_to_adaptive(self):
+        """Claude 5 hard-400s on thinking.type="enabled": '"thinking.type.enabled" is
+        not supported for this model. Use "thinking.type.adaptive" and
+        "output_config.effort"'. So ``:extended`` must resolve to adaptive here.
+        """
+        base, config = resolve_thinking_model("bedrock-claude-5-opus:extended")
+        assert base == "bedrock-claude-5-opus"
+        assert config == ThinkingConfig(type="adaptive")
+
+    def test_adaptive_only_sonnet_extended_downgrades_to_adaptive(self):
+        base, config = resolve_thinking_model("bedrock-claude-5-sonnet:extended")
+        assert base == "bedrock-claude-5-sonnet"
+        assert config == ThinkingConfig(type="adaptive")
+
+    def test_adaptive_only_model_adaptive_suffix_still_works(self):
+        base, config = resolve_thinking_model("bedrock-claude-5-opus:adaptive")
+        assert base == "bedrock-claude-5-opus"
+        assert config == ThinkingConfig(type="adaptive")
+
+    def test_claude_4_6_extended_keeps_enabled_budget(self):
+        base, config = resolve_thinking_model("bedrock-claude-4-6-opus:extended")
+        assert base == "bedrock-claude-4-6-opus"
+        assert config == ThinkingConfig(type="enabled", budget_tokens=32000)
+
+    def test_claude_4_6_sonnet_extended_keeps_enabled_budget(self):
+        base, config = resolve_thinking_model("bedrock-claude-4-6-sonnet:extended")
+        assert config == ThinkingConfig(type="enabled", budget_tokens=32000)
+
+    def test_fable_extended_downgrades_to_adaptive(self):
+        base, config = resolve_thinking_model("claude-fable-5:extended")
+        assert base == "claude-fable-5"
+        assert config == ThinkingConfig(type="adaptive")
+
+    def test_claude_4_7_extended_downgrades_to_adaptive(self):
+        base, config = resolve_thinking_model("bedrock-claude-4-7-opus:extended")
+        assert config == ThinkingConfig(type="adaptive")
 
     def test_non_claude_with_colon_unchanged(self):
         base, config = resolve_thinking_model("some-model:v2")
