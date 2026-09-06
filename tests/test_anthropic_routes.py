@@ -1,5 +1,5 @@
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import openai
@@ -9,6 +9,7 @@ from openai.types.chat.chat_completion import ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice as CompletionChoice
 from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice
 from openai.types.chat.chat_completion_chunk import ChoiceDelta
+from openai.types.completion_usage import CompletionUsage
 
 from src.main import app
 
@@ -69,6 +70,27 @@ def _chunk(
         created=created,
         model=model,
         choices=[ChunkChoice(index=0, delta=delta, finish_reason=finish_reason)],
+    )
+
+
+def _usage_chunk(
+    *,
+    id: str = "chatcmpl-1",
+    model: str = "m",
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+) -> ChatCompletionChunk:
+    return ChatCompletionChunk(
+        id=id,
+        object="chat.completion.chunk",
+        created=0,
+        model=model,
+        choices=[],
+        usage=CompletionUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        ),
     )
 
 
@@ -389,6 +411,149 @@ class TestMessagesStreaming:
                 events = _parse_sse_events(response.text)
                 event_types = [e["event"] for e in events]
                 assert "message_stop" in event_types
+
+    def test_streaming_emits_exactly_one_terminal_sequence(self):
+        async def handler(**kwargs):
+            async def gen():
+                yield _chunk(content="hi")
+                yield _chunk(finish_reason="stop")
+            return gen()
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/messages",
+                    json={
+                        "model": "m",
+                        "max_tokens": 100,
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "stream": True,
+                    },
+                )
+                event_types = [e["event"] for e in _parse_sse_events(response.text)]
+                assert event_types.count("message_start") == 1
+                assert event_types.count("message_delta") == 1
+                assert event_types.count("message_stop") == 1
+                assert event_types[0] == "message_start"
+                assert event_types[-1] == "message_stop"
+
+    def test_streaming_first_chunk_carrying_finish_reason_is_not_duplicated(self):
+        async def handler(**kwargs):
+            async def gen():
+                yield _chunk(content="done", finish_reason="stop")
+            return gen()
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/messages",
+                    json={
+                        "model": "m",
+                        "max_tokens": 100,
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "stream": True,
+                    },
+                )
+                event_types = [e["event"] for e in _parse_sse_events(response.text)]
+                assert event_types.count("message_start") == 1
+                assert event_types.count("message_delta") == 1
+                assert event_types.count("message_stop") == 1
+
+    def test_empty_stream_still_opens_with_message_start(self):
+        async def handler(**kwargs):
+            async def empty_gen():
+                return
+                yield  # noqa: F841
+            return empty_gen()
+
+        mock_settings = MagicMock()
+        mock_settings.stream_empty_retry_max = 0
+        mock_settings.log_level = "INFO"
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa, patch("src.proxy.anthropic.routes.settings", mock_settings):
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/messages",
+                    json={
+                        "model": "m",
+                        "max_tokens": 100,
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "stream": True,
+                    },
+                )
+                assert response.status_code == 200
+                event_types = [e["event"] for e in _parse_sse_events(response.text)]
+                assert event_types[0] == "message_start"
+                assert event_types[-1] == "message_stop"
+
+    def test_streaming_reports_usage_from_trailing_chunk(self):
+        async def handler(**kwargs):
+            async def gen():
+                yield _chunk(content="hi")
+                yield _chunk(finish_reason="stop")
+                yield _usage_chunk(prompt_tokens=9, completion_tokens=31)
+            return gen()
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/messages",
+                    json={
+                        "model": "m",
+                        "max_tokens": 100,
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "stream": True,
+                    },
+                )
+                events = _parse_sse_events(response.text)
+                delta = next(e["data"] for e in events if e["event"] == "message_delta")
+                assert delta["usage"]["output_tokens"] == 31
+
+    def test_streaming_parallel_tool_calls_use_distinct_block_indices(self):
+        async def handler(**kwargs):
+            async def gen():
+                yield _chunk(tool_calls=[
+                    {"index": 0, "id": "call_a", "function": {"name": "get_weather", "arguments": ""}},
+                    {"index": 1, "id": "call_b", "function": {"name": "get_time", "arguments": ""}},
+                ])
+                yield _chunk(tool_calls=[
+                    {"index": 1, "function": {"arguments": '{"c":"Paris"}'}},
+                    {"index": 0, "function": {"arguments": '{"c":"Tokyo"}'}},
+                ])
+                yield _chunk(finish_reason="tool_calls")
+            return gen()
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/messages",
+                    json={
+                        "model": "m",
+                        "max_tokens": 100,
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "stream": True,
+                    },
+                )
+                events = _parse_sse_events(response.text)
+                starts = {e["data"]["content_block"]["name"]: e["data"]["index"]
+                          for e in events if e["event"] == "content_block_start"}
+                assert starts["get_weather"] != starts["get_time"]
+
+                deltas = {e["data"]["delta"]["partial_json"]: e["data"]["index"]
+                          for e in events if e["event"] == "content_block_delta"}
+                assert deltas['{"c":"Tokyo"}'] == starts["get_weather"]
+                assert deltas['{"c":"Paris"}'] == starts["get_time"]
+
+                stop_indices = [e["data"]["index"] for e in events
+                                if e["event"] == "content_block_stop"]
+                assert len(set(stop_indices)) == 2
+                delta = next(e["data"] for e in events if e["event"] == "message_delta")
+                assert delta["delta"]["stop_reason"] == "tool_use"
 
 
 class TestMessagesErrors:

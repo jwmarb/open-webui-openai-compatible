@@ -1,22 +1,53 @@
-"""Token provider — reads JWT from file or environment, checks expiry."""
+"""Token store and refresh protocol.
+
+The only interface callers need for credentials:
+
+- `get_current_token()` — the token on disk or in the environment.
+- `request_refresh()` — ask for a single-flight renewal; returns whether a
+  sidecar was spawned.
+- `should_refresh(token, body)` — is an upstream rejection token-related?
+
+Single-flight ownership belongs to the spawned sidecar, never to the caller:
+the sidecar acquires the lock for the entire refresh and losing sidecars exit
+as no-ops. A caller that held the lock across the spawn would block the very
+child it just started.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+import subprocess
+import sys
+import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import jwt
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TOKEN_FILE = Path.home() / ".config" / "open-webui-proxy" / "token.json"
+REFRESH_LOCK_PATH: Final[Path] = Path("/tmp/openwebui-proxy-refresh.lock")
+PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
+REFRESH_SCRIPT: Final[Path] = PROJECT_ROOT / "playwright_login.py"
+SIDECAR_LOG_PATH: Final[Path] = Path("/tmp/sidecar.log")
+
+TOKEN_KEY: Final[str] = "token"
+EXPIRES_AT_KEY: Final[str] = "expires_at"
+RETRIEVED_AT_KEY: Final[str] = "retrieved_at"
+TOKEN_FILE_MODE: Final[int] = 0o600
+
+_TOKEN_REJECTION_CODES: Final[frozenset[str]] = frozenset({
+    "invalid_issuer",
+    "invalid_token",
+    "token_expired",
+})
 
 
-def _get_token_file_path() -> Path:
+def get_token_file_path() -> Path:
     env_path = os.environ.get("TOKEN_FILE")
     if env_path:
         return Path(env_path)
@@ -36,8 +67,9 @@ def get_token_expiry(token: str | None) -> int | None:
 def is_token_expired_or_invalid(token: str | None) -> bool:
     """True only when the token is a decodable JWT whose exp has passed.
 
-    A malformed token returns False: re-running the browser login cannot repair a
-    garbled token, so it must not be treated as grounds for a refresh.
+    A malformed token returns False. The browser login would in fact overwrite
+    it, but treating local corruption as grounds for renewal turns every
+    request into a refresh storm, so it must not trigger one.
     """
     if not token:
         return False
@@ -51,23 +83,34 @@ def is_token_expired_or_invalid(token: str | None) -> bool:
     return time.time() > exp
 
 
-def is_token_expired(token: str | None) -> bool:
-    if not token:
-        return False
+def write_token_file(token: str, expires_at: int | None, path: Path | None = None) -> Path:
+    """Atomically replace the token file, mode 0600 from creation."""
+    token_path = path or get_token_file_path()
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        TOKEN_KEY: token,
+        EXPIRES_AT_KEY: expires_at,
+        RETRIEVED_AT_KEY: int(time.time()),
+    }
+
+    fd, tmp_name = tempfile.mkstemp(dir=str(token_path.parent), prefix=".token-", suffix=".tmp")
     try:
-        payload = jwt.decode(token, options={"verify_signature": False})
-        exp = payload.get("exp")
-        if exp is None:
-            return False
-        return time.time() > exp
-    except Exception:
-        return False
+        os.fchmod(fd, TOKEN_FILE_MODE)
+        with os.fdopen(fd, "w") as handle:
+            json.dump(payload, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, token_path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    return token_path
 
 
 def _read_token_from_file(path: Path) -> str | None:
     try:
         data: dict[str, Any] = json.loads(path.read_text())
-        token = data.get("token")
+        token = data.get(TOKEN_KEY)
         if isinstance(token, str) and token:
             return token
     except (OSError, json.JSONDecodeError, TypeError) as exc:
@@ -81,7 +124,7 @@ def _read_token_from_env() -> str | None:
 
 
 def get_current_token() -> str:
-    token_file = _get_token_file_path()
+    token_file = get_token_file_path()
 
     if token_file.exists():
         token = _read_token_from_file(token_file)
@@ -97,3 +140,57 @@ def get_current_token() -> str:
         "Set USER_TOKEN environment variable or provide a token file at "
         f"{token_file} via the TOKEN_FILE environment variable."
     )
+
+
+def extract_error_code(body: Any) -> str | None:
+    if not isinstance(body, dict):
+        return None
+    code = body.get("code")
+    if isinstance(code, str):
+        return code
+    error = body.get("error")
+    if isinstance(error, dict):
+        nested = error.get("code")
+        if isinstance(nested, str):
+            return nested
+    return None
+
+
+def should_refresh(token: str | None, body: Any) -> bool:
+    """A 401 alone is ambiguous; require positive evidence of a token fault."""
+    if is_token_expired_or_invalid(token):
+        return True
+    return extract_error_code(body) in _TOKEN_REJECTION_CODES
+
+
+def request_refresh() -> bool:
+    """Spawn the refresh sidecar, which owns the single-flight lock itself.
+
+    Returns True when a sidecar process was started. Concurrent callers may
+    each spawn one; every loser exits immediately as a no-op.
+    """
+    if not REFRESH_SCRIPT.exists():
+        logger.error("Refresh sidecar not found at %s", REFRESH_SCRIPT)
+        return False
+
+    try:
+        log_handle = open(SIDECAR_LOG_PATH, "a")
+    except OSError as exc:
+        logger.error("Cannot open sidecar log %s: %s", SIDECAR_LOG_PATH, exc)
+        return False
+
+    try:
+        subprocess.Popen(
+            [sys.executable, str(REFRESH_SCRIPT)],
+            stdout=log_handle,
+            stderr=log_handle,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        logger.error("Failed to spawn refresh sidecar: %s", exc)
+        return False
+    finally:
+        log_handle.close()
+
+    logger.info("Token refresh sidecar spawned")
+    return True

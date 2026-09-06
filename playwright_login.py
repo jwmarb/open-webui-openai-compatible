@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import fcntl
-import json
 import logging
 import os
 import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from src.auth import (  # noqa: E402
+    REFRESH_LOCK_PATH,
+    get_token_expiry,
+    write_token_file,
+)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -16,7 +23,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
 )
 
-LOCK_PATH = Path("/tmp/openwebui-proxy-refresh.lock")
+LOCK_PATH = REFRESH_LOCK_PATH
 MFA_TIMEOUT_MS = 300_000
 
 _SSO_SELECTORS = (
@@ -134,21 +141,14 @@ def _acquire_lock() -> int | None:
 
 
 def _release_lock(fd: int) -> None:
+    # Never unlink the lock path: a fresh inode would let a concurrent caller
+    # acquire immediately, defeating mutual exclusion.
     fcntl.flock(fd, fcntl.LOCK_UN)
     os.close(fd)
-    LOCK_PATH.unlink(missing_ok=True)
 
 
 def _write_token_file(token: str, expires_at: int | None) -> None:
-    token_path = Path(os.environ.get("TOKEN_FILE", str(Path.home() / ".config" / "open-webui-proxy" / "token.json")))
-    token_path.parent.mkdir(parents=True, exist_ok=True)
-    data = {
-        "token": token,
-        "expires_at": expires_at,
-        "retrieved_at": int(time.time()),
-    }
-    token_path.write_text(json.dumps(data))
-    os.chmod(str(token_path), 0o600)
+    token_path = write_token_file(token, expires_at)
     logger.info("Token written to %s (expires_at=%s)", token_path, expires_at)
 
 
@@ -256,12 +256,8 @@ def _run_with_lock(_lock_fd: int) -> bool:
                     browser.close()
                     return False
 
-            expires_at = None
-            try:
-                import jwt
-                payload = jwt.decode(token, options={"verify_signature": False})
-                expires_at = payload.get("exp")
-            except Exception:
+            expires_at = get_token_expiry(token)
+            if expires_at is None:
                 logger.warning("Could not decode token expiry")
 
             _write_token_file(token, expires_at)

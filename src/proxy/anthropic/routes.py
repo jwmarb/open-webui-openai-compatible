@@ -132,19 +132,14 @@ async def _handle_streaming(
     async def _generate() -> AsyncGenerator[bytes, None]:
         state = StreamingState(model=model)
         chunk_dict = first_chunk.model_dump(exclude_unset=True)
-        events = state.translate_chunk(chunk_dict)
-        for event in events:
+        for event in state.translate_chunk(chunk_dict):
             yield _sse_event(event["type"], event)
 
-        saw_finish = False
         try:
             async for chunk in stream:  # type: ignore[union-attr]
                 chunk_dict = chunk.model_dump(exclude_unset=True)
-                events = state.translate_chunk(chunk_dict)
-                for event in events:
+                for event in state.translate_chunk(chunk_dict):
                     yield _sse_event(event["type"], event)
-                    if event.get("type") == "message_stop":
-                        saw_finish = True
         except Exception as exc:
             log_upstream_error(exc, "Anthropic mid-stream error")
             msg, _, _ = classify_upstream_error(exc)
@@ -152,9 +147,8 @@ async def _handle_streaming(
             yield _sse_event("error", err_event)
             return
 
-        if not saw_finish:
-            for event in state.finalize():
-                yield _sse_event(event["type"], event)
+        for event in state.finalize():
+            yield _sse_event(event["type"], event)
 
     return StreamingResponse(
         _generate(),

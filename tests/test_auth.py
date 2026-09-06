@@ -11,7 +11,7 @@ from typing import Any
 import jwt
 import pytest
 
-from src.auth import get_token_expiry, is_token_expired, is_token_expired_or_invalid
+from src.auth import get_token_expiry, is_token_expired_or_invalid
 
 DEFAULT_TOKEN_FILE = Path.home() / ".config" / "open-webui-proxy" / "token.json"
 
@@ -49,26 +49,26 @@ class TestGetTokenExpiry:
 
 
 class TestIsTokenExpired:
-    """Tests for is_token_expired — checks if JWT exp claim has passed."""
+    """Tests for is_token_expired_or_invalid — checks if JWT exp claim has passed."""
 
     def test_returns_false_for_fresh_token(self):
         token = _make_jwt(exp_offset_seconds=3600)
-        assert is_token_expired(token) is False
+        assert is_token_expired_or_invalid(token) is False
 
     def test_returns_true_for_expired_token(self):
         token = _make_jwt(exp_offset_seconds=-3600)
-        assert is_token_expired(token) is True
+        assert is_token_expired_or_invalid(token) is True
 
     def test_returns_false_for_token_without_exp(self):
         payload = {"id": "test-user", "iat": int(time.time())}
         token = jwt.encode(payload, "test-secret", algorithm="HS256")
-        assert is_token_expired(token) is False
+        assert is_token_expired_or_invalid(token) is False
 
     def test_returns_false_for_invalid_token(self):
-        assert is_token_expired("not-a-jwt") is False
+        assert is_token_expired_or_invalid("not-a-jwt") is False
 
     def test_returns_false_for_none_token(self):
-        assert is_token_expired(None) is False  # type: ignore[arg-type]
+        assert is_token_expired_or_invalid(None) is False  # type: ignore[arg-type]
 
 
 class TestIsTokenExpiredOrInvalid:

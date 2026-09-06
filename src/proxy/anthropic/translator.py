@@ -311,7 +311,14 @@ def translate_response(openai_response: dict[str, Any], model: str) -> dict[str,
 
 
 class StreamingState:
-    """Tracks state for translating OpenAI streaming chunks to Anthropic SSE events."""
+    """Translates OpenAI streaming chunks to Anthropic SSE events.
+
+    Owns the whole message lifecycle: exactly one `message_start`, block-index
+    allocation (including one block per upstream tool-call index), usage
+    collection, and exactly one terminal `message_delta`/`message_stop` pair
+    emitted only from `finalize()`. Callers feed chunks and call `finalize()`
+    once; they never infer ordering themselves.
+    """
 
     def __init__(self, model: str, request_id: str | None = None):
         self.model = model
@@ -321,9 +328,13 @@ class StreamingState:
         self.started = False
         self.input_tokens = 0
         self.output_tokens = 0
-        self._tool_call_args: dict[int, str] = {}
+        self._tool_block_index: dict[int, int] = {}
+        self._open_tool_indices: set[int] = set()
+        self._stop_reason: str | None = None
+        self._finalized = False
 
     def _start_message_event(self) -> dict[str, Any]:
+        self.started = True
         return {
             "type": "message_start",
             "message": {
@@ -338,50 +349,63 @@ class StreamingState:
             },
         }
 
-    def _content_block_start(self, block: dict[str, Any]) -> dict[str, Any]:
+    def _content_block_start(self, block: dict[str, Any], index: int) -> dict[str, Any]:
         return {
             "type": "content_block_start",
-            "index": self.block_index,
+            "index": index,
             "content_block": block,
         }
 
-    def _content_block_delta(self, delta: dict[str, Any]) -> dict[str, Any]:
+    def _content_block_delta(self, delta: dict[str, Any], index: int) -> dict[str, Any]:
         return {
             "type": "content_block_delta",
-            "index": self.block_index,
+            "index": index,
             "delta": delta,
         }
 
-    def _content_block_stop(self) -> dict[str, Any]:
+    def _content_block_stop(self, index: int) -> dict[str, Any]:
         return {
             "type": "content_block_stop",
-            "index": self.block_index,
+            "index": index,
         }
 
     def _close_current_block(self) -> list[dict[str, Any]]:
         if self.current_block_type is None:
             return []
-        events = [self._content_block_stop()]
+        events = [self._content_block_stop(self.block_index)]
         self.block_index += 1
         self.current_block_type = None
         return events
 
+    def _close_open_tool_blocks(self) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        for tool_index in sorted(self._open_tool_indices):
+            events.append(self._content_block_stop(self._tool_block_index[tool_index]))
+        self._open_tool_indices.clear()
+        return events
+
+    def _absorb_usage(self, chunk: dict[str, Any]) -> None:
+        usage = chunk.get("usage")
+        if not usage:
+            return
+        prompt_tokens = usage.get("prompt_tokens")
+        if prompt_tokens is not None:
+            self.input_tokens = prompt_tokens
+        completion_tokens = usage.get("completion_tokens")
+        if completion_tokens is not None:
+            self.output_tokens = completion_tokens
+
     def translate_chunk(self, chunk: dict[str, Any]) -> list[dict[str, Any]]:
-        """Translate a single OpenAI streaming chunk to Anthropic SSE events."""
+        """Translate one OpenAI chunk. Terminal events are deferred to finalize()."""
         events: list[dict[str, Any]] = []
 
+        self._absorb_usage(chunk)
+
         if not self.started:
-            usage = chunk.get("usage")
-            if usage:
-                self.input_tokens = usage.get("prompt_tokens", 0)
             events.append(self._start_message_event())
-            self.started = True
 
         choices = chunk.get("choices", [])
         if not choices:
-            usage = chunk.get("usage")
-            if usage:
-                self.output_tokens = usage.get("completion_tokens", usage.get("total_tokens", 0))
             return events
 
         delta = choices[0].get("delta", {})
@@ -396,11 +420,19 @@ class StreamingState:
                     "type": "thinking",
                     "thinking": "",
                     "signature": "",
-                }))
+                }, self.block_index))
             events.append(self._content_block_delta({
                 "type": "thinking_delta",
                 "thinking": reasoning,
-            }))
+            }, self.block_index))
+
+        for block in delta.get("thinking_blocks") or []:
+            signature = block.get("signature")
+            if signature and self.current_block_type == "thinking":
+                events.append(self._content_block_delta({
+                    "type": "signature_delta",
+                    "signature": signature,
+                }, self.block_index))
 
         content = delta.get("content")
         if content:
@@ -410,57 +442,68 @@ class StreamingState:
                 events.append(self._content_block_start({
                     "type": "text",
                     "text": "",
-                }))
+                }, self.block_index))
             events.append(self._content_block_delta({
                 "type": "text_delta",
                 "text": content,
-            }))
+            }, self.block_index))
 
         tool_calls = delta.get("tool_calls")
         if tool_calls:
-            for tc in tool_calls:
-                tc_index = tc.get("index", 0)
-                func = tc.get("function", {})
-
-                if func.get("name"):
-                    events.extend(self._close_current_block())
-                    self.current_block_type = "tool_use"
-                    self._tool_call_args[tc_index] = ""
-                    events.append(self._content_block_start({
-                        "type": "tool_use",
-                        "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
-                        "name": func["name"],
-                        "input": {},
-                    }))
-
-                args_chunk = func.get("arguments", "")
-                if args_chunk:
-                    self._tool_call_args[tc_index] = self._tool_call_args.get(tc_index, "") + args_chunk
-                    events.append(self._content_block_delta({
-                        "type": "input_json_delta",
-                        "partial_json": args_chunk,
-                    }))
+            events.extend(self._translate_tool_calls(tool_calls))
 
         if finish_reason:
-            events.extend(self._close_current_block())
-            stop_reason = _map_finish_reason(finish_reason)
-            events.append({
-                "type": "message_delta",
-                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-                "usage": {"output_tokens": self.output_tokens},
-            })
-            events.append({"type": "message_stop"})
+            self._stop_reason = _map_finish_reason(finish_reason)
+
+        return events
+
+    def _translate_tool_calls(self, tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+
+        for tc in tool_calls:
+            tool_index = tc.get("index", 0)
+            func = tc.get("function", {})
+
+            if tool_index not in self._tool_block_index:
+                events.extend(self._close_current_block())
+                self._tool_block_index[tool_index] = self.block_index
+                self._open_tool_indices.add(tool_index)
+                self.block_index += 1
+                events.append(self._content_block_start({
+                    "type": "tool_use",
+                    "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
+                    "name": func.get("name", ""),
+                    "input": {},
+                }, self._tool_block_index[tool_index]))
+
+            args_chunk = func.get("arguments", "")
+            if args_chunk:
+                events.append(self._content_block_delta({
+                    "type": "input_json_delta",
+                    "partial_json": args_chunk,
+                }, self._tool_block_index[tool_index]))
 
         return events
 
     def finalize(self) -> list[dict[str, Any]]:
-        """Emit closing events if stream ends without a finish_reason."""
+        """Emit the single terminal sequence. Safe to call more than once."""
+        if self._finalized:
+            return []
+        self._finalized = True
+
         events: list[dict[str, Any]] = []
+        if not self.started:
+            events.append(self._start_message_event())
         events.extend(self._close_current_block())
+        events.extend(self._close_open_tool_blocks())
         events.append({
             "type": "message_delta",
-            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+            "delta": {
+                "stop_reason": self._stop_reason or "end_turn",
+                "stop_sequence": None,
+            },
             "usage": {"output_tokens": self.output_tokens},
         })
         events.append({"type": "message_stop"})
         return events
+

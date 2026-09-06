@@ -502,7 +502,7 @@ class TestStreamingState:
         assert delta_evt["delta"]["type"] == "input_json_delta"
         assert delta_evt["delta"]["partial_json"] == '{"q":'
 
-    def test_finish_reason_emits_message_delta_and_stop(self):
+    def test_finish_reason_defers_terminal_events_to_finalize(self):
         state = StreamingState(model="m")
         state.started = True
         state.current_block_type = "text"
@@ -511,10 +511,14 @@ class TestStreamingState:
         }
         events = state.translate_chunk(chunk)
         type_sequence = [e["type"] for e in events]
-        assert "content_block_stop" in type_sequence
-        assert "message_delta" in type_sequence
-        assert "message_stop" in type_sequence
-        delta_evt = next(e for e in events if e["type"] == "message_delta")
+        assert "message_delta" not in type_sequence
+        assert "message_stop" not in type_sequence
+
+        final = state.finalize()
+        final_sequence = [e["type"] for e in final]
+        assert final_sequence.index("content_block_stop") < final_sequence.index("message_delta")
+        assert "message_stop" in final_sequence
+        delta_evt = next(e for e in final if e["type"] == "message_delta")
         assert delta_evt["delta"]["stop_reason"] == "end_turn"
 
     def test_finalize_emits_closing_events(self):
@@ -545,3 +549,169 @@ class TestStreamingState:
         assert "content_block_stop" in type_sequence
         assert state.current_block_type == "text"
         assert state.block_index == 1
+
+
+class TestStreamingStateLifecycle:
+    def test_finalize_on_unstarted_state_emits_message_start_first(self):
+        state = StreamingState(model="claude-sonnet-4-20250514")
+        events = state.finalize()
+        type_sequence = [e["type"] for e in events]
+        assert type_sequence[0] == "message_start"
+        assert type_sequence[-1] == "message_stop"
+        assert type_sequence.count("message_start") == 1
+        assert type_sequence.count("message_stop") == 1
+        assert events[0]["message"]["model"] == "claude-sonnet-4-20250514"
+
+    def test_finish_reason_then_finalize_emits_single_terminal_sequence(self):
+        state = StreamingState(model="m")
+        first = state.translate_chunk({
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}],
+        })
+        second = state.finalize()
+        combined = [e["type"] for e in first + second]
+        assert combined.count("message_start") == 1
+        assert combined.count("message_delta") == 1
+        assert combined.count("message_stop") == 1
+
+    def test_finalize_is_idempotent(self):
+        state = StreamingState(model="m")
+        state.translate_chunk({
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}],
+        })
+        combined = [e["type"] for e in state.finalize() + state.finalize()]
+        assert combined.count("message_delta") == 1
+        assert combined.count("message_stop") == 1
+
+    def test_message_stop_is_strictly_terminal(self):
+        state = StreamingState(model="m")
+        events = state.translate_chunk({
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}],
+        }) + state.finalize()
+        type_sequence = [e["type"] for e in events]
+        assert type_sequence[-1] == "message_stop"
+
+
+class TestStreamingStateUsage:
+    def test_usage_arriving_after_finish_reason_is_reported(self):
+        state = StreamingState(model="m")
+        state.translate_chunk({
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}],
+        })
+        state.translate_chunk({
+            "choices": [],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 42, "total_tokens": 53},
+        })
+        events = state.finalize()
+        delta_evt = next(e for e in events if e["type"] == "message_delta")
+        assert delta_evt["usage"]["output_tokens"] == 42
+
+    def test_total_tokens_is_not_used_as_output_token_fallback(self):
+        state = StreamingState(model="m")
+        state.translate_chunk({
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}],
+        })
+        state.translate_chunk({
+            "choices": [],
+            "usage": {"prompt_tokens": 100, "total_tokens": 130},
+        })
+        events = state.finalize()
+        delta_evt = next(e for e in events if e["type"] == "message_delta")
+        assert delta_evt["usage"]["output_tokens"] != 130
+
+    def test_input_tokens_reported_on_message_start(self):
+        state = StreamingState(model="m")
+        events = state.translate_chunk({
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}],
+            "usage": {"prompt_tokens": 7, "completion_tokens": 0},
+        })
+        start_evt = next(e for e in events if e["type"] == "message_start")
+        assert start_evt["message"]["usage"]["input_tokens"] == 7
+
+
+class TestStreamingStateParallelToolCalls:
+    def _two_tool_chunk(self):
+        return {
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [
+                        {"index": 0, "id": "call_a", "function": {"name": "get_weather", "arguments": ""}},
+                        {"index": 1, "id": "call_b", "function": {"name": "get_time", "arguments": ""}},
+                    ],
+                },
+                "finish_reason": None,
+            }],
+        }
+
+    def test_parallel_tool_calls_get_distinct_block_indices(self):
+        state = StreamingState(model="m")
+        events = state.translate_chunk(self._two_tool_chunk())
+        starts = [e for e in events if e["type"] == "content_block_start"]
+        assert len(starts) == 2
+        assert starts[0]["content_block"]["name"] == "get_weather"
+        assert starts[1]["content_block"]["name"] == "get_time"
+        assert starts[0]["index"] != starts[1]["index"]
+
+    def test_argument_deltas_carry_their_own_block_index(self):
+        state = StreamingState(model="m")
+        start_events = state.translate_chunk(self._two_tool_chunk())
+        starts = {e["content_block"]["name"]: e["index"] for e in start_events
+                  if e["type"] == "content_block_start"}
+
+        events = state.translate_chunk({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [
+                        {"index": 1, "function": {"arguments": '{"city":"Paris"}'}},
+                        {"index": 0, "function": {"arguments": '{"city":"Tokyo"}'}},
+                    ],
+                },
+                "finish_reason": None,
+            }],
+        })
+        by_json = {e["delta"]["partial_json"]: e["index"] for e in events
+                   if e["type"] == "content_block_delta"}
+        assert by_json['{"city":"Tokyo"}'] == starts["get_weather"]
+        assert by_json['{"city":"Paris"}'] == starts["get_time"]
+
+    def test_each_parallel_tool_block_is_closed_once(self):
+        state = StreamingState(model="m")
+        events = state.translate_chunk(self._two_tool_chunk())
+        events += state.translate_chunk({
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+        })
+        events += state.finalize()
+        stops = [e for e in events if e["type"] == "content_block_stop"]
+        assert len(stops) == 2
+        assert len({e["index"] for e in stops}) == 2
+
+    def test_tool_call_stop_reason_maps_to_tool_use(self):
+        state = StreamingState(model="m")
+        state.translate_chunk(self._two_tool_chunk())
+        state.translate_chunk({
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+        })
+        events = state.finalize()
+        delta_evt = next(e for e in events if e["type"] == "message_delta")
+        assert delta_evt["delta"]["stop_reason"] == "tool_use"
+
+
+class TestStreamingStateThinkingSignature:
+    def test_signature_delta_is_emitted_when_upstream_supplies_one(self):
+        state = StreamingState(model="m")
+        state.translate_chunk({
+            "choices": [{"index": 0, "delta": {"reasoning_content": "step"}, "finish_reason": None}],
+        })
+        events = state.translate_chunk({
+            "choices": [{
+                "index": 0,
+                "delta": {"thinking_blocks": [{"type": "thinking", "signature": "sig-abc"}]},
+                "finish_reason": None,
+            }],
+        })
+        sig_deltas = [e for e in events
+                      if e["type"] == "content_block_delta" and e["delta"].get("type") == "signature_delta"]
+        assert len(sig_deltas) == 1
+        assert sig_deltas[0]["delta"]["signature"] == "sig-abc"
+
