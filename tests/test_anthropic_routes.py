@@ -672,3 +672,134 @@ class TestMessagesErrors:
                 error_events = [e for e in events if e["event"] == "error"]
                 assert len(error_events) >= 1
                 assert error_events[0]["data"]["error"]["type"] == "api_error"
+
+
+class TestMessagesThinkingSuffix:
+    def test_extended_suffix_is_stripped_before_upstream(self):
+        captured: dict = {}
+
+        async def handler(**kwargs):
+            captured.update(kwargs)
+            return _completion(content="ok")
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(app) as tc:
+                tc.post(
+                    "/v1/messages",
+                    json={
+                        "model": "claude-sonnet-4-20250514:extended",
+                        "max_tokens": 100,
+                        "messages": [{"role": "user", "content": "Hi"}],
+                    },
+                )
+        assert captured["model"] == "claude-sonnet-4-20250514"
+        assert captured.get("extra_body", {}).get("thinking") == {
+            "type": "enabled", "budget_tokens": 32_000,
+        }
+
+    def test_adaptive_suffix_is_stripped_before_upstream(self):
+        captured: dict = {}
+
+        async def handler(**kwargs):
+            captured.update(kwargs)
+            return _completion(content="ok")
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(app) as tc:
+                tc.post(
+                    "/v1/messages",
+                    json={
+                        "model": "claude-4-6-opus:adaptive",
+                        "max_tokens": 100,
+                        "messages": [{"role": "user", "content": "Hi"}],
+                    },
+                )
+        assert captured["model"] == "claude-4-6-opus"
+        assert captured.get("extra_body", {}).get("thinking") == {"type": "adaptive"}
+
+    def test_suffix_on_non_anthropic_model_is_stripped_without_thinking(self):
+        captured: dict = {}
+
+        async def handler(**kwargs):
+            captured.update(kwargs)
+            return _completion(content="ok")
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(app) as tc:
+                tc.post(
+                    "/v1/messages",
+                    json={
+                        "model": "gpt-4o:extended",
+                        "max_tokens": 100,
+                        "messages": [{"role": "user", "content": "Hi"}],
+                    },
+                )
+        assert captured["model"] == "gpt-4o"
+        assert "thinking" not in captured.get("extra_body", {})
+
+
+class TestMessagesTokenRefresh:
+    def _expired_jwt(self) -> str:
+        import time
+
+        import jwt
+        now = int(time.time())
+        return jwt.encode({"id": "u", "iat": now - 7200, "exp": now - 3600}, "s", algorithm="HS256")
+
+    def test_401_with_expired_token_spawns_refresh_and_returns_503(self, monkeypatch):
+        monkeypatch.setenv("USER_TOKEN", self._expired_jwt())
+
+        async def handler(**kwargs):
+            raise openai.APIStatusError(
+                message="Unauthorized",
+                response=httpx.Response(401, request=_DUMMY_REQUEST),
+                body=None,
+            )
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa, patch("src.proxy.anthropic.routes.request_refresh") as mock_refresh:
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/messages",
+                    json={
+                        "model": "m",
+                        "max_tokens": 100,
+                        "messages": [{"role": "user", "content": "Hi"}],
+                    },
+                )
+        assert response.status_code == 503
+        mock_refresh.assert_called_once()
+        body = response.json()
+        assert body["type"] == "error"
+
+    def test_401_without_token_evidence_passes_through(self, monkeypatch):
+        import time
+
+        import jwt
+        now = int(time.time())
+        monkeypatch.setenv("USER_TOKEN", jwt.encode(
+            {"id": "u", "iat": now, "exp": now + 3600}, "s", algorithm="HS256"))
+
+        async def handler(**kwargs):
+            raise openai.APIStatusError(
+                message="Unauthorized",
+                response=httpx.Response(401, request=_DUMMY_REQUEST),
+                body={"code": "model_access_denied"},
+            )
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa, patch("src.proxy.anthropic.routes.request_refresh") as mock_refresh:
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/messages",
+                    json={
+                        "model": "m",
+                        "max_tokens": 100,
+                        "messages": [{"role": "user", "content": "Hi"}],
+                    },
+                )
+        assert response.status_code == 401
+        mock_refresh.assert_not_called()

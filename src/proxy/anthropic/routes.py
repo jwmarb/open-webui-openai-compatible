@@ -12,10 +12,11 @@ import openai
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ...auth import get_current_token, request_refresh, should_refresh
 from ...errors import classify_upstream_error, log_upstream_error
+from ...open_webui.request_policy import prepare_chat_body
 from ...settings import settings
-from ..openai.routes import _split_body_for_sdk
-from ..openai.translator import rewrite_chat_body
+from ..openai.translator import apply_thinking_params, resolve_thinking_model
 from .translator import (
     StreamingState,
     create_anthropic_error,
@@ -31,6 +32,26 @@ _SSE_HEADERS: Final[dict[str, str]] = {
 }
 
 router = APIRouter()
+
+
+def _refresh_for(exc: Exception) -> bool:
+    """Renew on a 401 that carries positive evidence the token is at fault."""
+    if not isinstance(exc, openai.APIStatusError) or exc.status_code != 401:
+        return False
+    if not should_refresh(get_current_token(), getattr(exc, "body", None)):
+        return False
+    request_refresh()
+    return True
+
+
+def _token_expired_error_response() -> JSONResponse:
+    return JSONResponse(
+        content=create_anthropic_error(
+            "Upstream authentication token expired. Token refresh initiated. Please retry your request.",
+            "api_error",
+        ),
+        status_code=503,
+    )
 
 
 def _anthropic_error_response(exc: Exception, context: str) -> JSONResponse:
@@ -66,10 +87,14 @@ async def messages(request: Request) -> JSONResponse | StreamingResponse:
     is_stream = raw_body.get("stream", False)
 
     openai_body = translate_request(raw_body)
-    openai_body = rewrite_chat_body(openai_body)
+
+    base_model, thinking_config = resolve_thinking_model(openai_body.get("model", ""))
+    openai_body["model"] = base_model
+    if thinking_config is not None:
+        openai_body = apply_thinking_params(openai_body, thinking_config)
 
     ai_client: openai.AsyncOpenAI = request.app.state.openai_client
-    sdk_kwargs, extra = _split_body_for_sdk(openai_body)
+    sdk_kwargs, extra = prepare_chat_body(openai_body)
 
     if is_stream:
         return await _handle_streaming(ai_client, sdk_kwargs, extra, requested_model)
@@ -95,12 +120,16 @@ async def _handle_streaming(
                 extra_body=extra or None,
             )
         except Exception as exc:
+            if _refresh_for(exc):
+                return _token_expired_error_response()
             return _anthropic_error_response(exc, "Anthropic streaming create")
 
         first_chunk: Any = None
         try:
             first_chunk = await stream.__anext__()  # type: ignore[union-attr]
         except Exception as exc:
+            if _refresh_for(exc):
+                return _token_expired_error_response()
             if isinstance(exc, openai.APIStatusError) and 400 <= exc.status_code < 500:
                 return _anthropic_error_response(exc, "Anthropic streaming first chunk")
             attempt += 1
@@ -172,4 +201,6 @@ async def _handle_non_streaming(
         anthropic_response = translate_response(response_dict, model)
         return JSONResponse(content=anthropic_response)
     except Exception as exc:
+        if _refresh_for(exc):
+            return _token_expired_error_response()
         return _anthropic_error_response(exc, "Anthropic non-streaming")

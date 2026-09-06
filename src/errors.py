@@ -1,19 +1,19 @@
-"""Shared error handling for all proxy frontends (OpenAI, Anthropic)."""
+"""Transport-neutral upstream error classification.
+
+Wire-format error bodies belong to each frontend: see
+`src.proxy.openai.errors` and `src.proxy.anthropic.translator`.
+"""
 
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 import openai
-
-from .proxy.openai.models import OpenAIErrorDetail, OpenAIErrorResponse
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "classify_upstream_error",
-    "create_openai_error",
     "log_upstream_error",
 ]
 
@@ -36,13 +36,3 @@ def log_upstream_error(exc: Exception, context: str) -> None:
         logger.error("%s: %s", context, exc)
     else:
         logger.exception("%s", context)
-
-
-def create_openai_error(
-    message: str,
-    error_type: str = "invalid_request_error",
-    code: int | None = None,
-) -> dict[str, Any]:
-    """Build an OpenAI-format error dict."""
-    resp = OpenAIErrorResponse(error=OpenAIErrorDetail(message=message, type=error_type, code=code))
-    return resp.model_dump()

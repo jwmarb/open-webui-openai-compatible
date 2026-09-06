@@ -1,0 +1,236 @@
+"""Open WebUI request policy.
+
+Everything this gateway requires of a chat body regardless of which wire
+format the client spoke. Both frontends hand a canonical OpenAI-shaped body to
+`prepare_chat_body()`; none of these rules belong to the OpenAI protocol.
+
+Pass order is load-bearing — see `rewrite_chat_body`.
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from typing import Any, Final
+
+from .capabilities import ModelCapabilities, capabilities_for
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "SDK_KNOWN_PARAMS",
+    "prepare_chat_body",
+    "rewrite_chat_body",
+    "split_body_for_sdk",
+]
+
+# Fields the openai SDK's chat.completions.create() accepts as explicit keyword
+# args. Everything else in the rewritten body goes into ``extra_body``.
+SDK_KNOWN_PARAMS: Final[frozenset[str]] = frozenset({
+    "model", "messages", "stream",
+    "frequency_penalty", "logit_bias", "logprobs", "top_logprobs",
+    "max_tokens", "max_completion_tokens", "n", "presence_penalty",
+    "response_format", "seed", "stop", "temperature", "top_p",
+    "tools", "tool_choice", "parallel_tool_calls", "user",
+    "stream_options", "metadata", "store", "service_tier",
+})
+
+_UNSUPPORTED_FIELDS: Final[frozenset[str]] = frozenset({"vector_store_ids", "file_ids"})
+
+_REASONING_CONTROL_FIELDS: Final[tuple[str, ...]] = (
+    "reasoning_effort",
+    "reasoning",
+    "effort",
+    "verbosity",
+    "textVerbosity",
+    "thinking",
+)
+
+_DUMMY_TOOL: Final[dict[str, Any]] = {
+    "type": "function",
+    "function": {
+        "name": "dummy_tool",
+        "description": "placeholder tool — never call",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+
+def _messages_reference_tools(messages: Any) -> bool:
+    if not isinstance(messages, list):
+        return False
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "tool":
+            return True
+        tool_calls = msg.get("tool_calls")
+        if isinstance(tool_calls, list) and len(tool_calls) > 0:
+            return True
+        if msg.get("tool_call_id"):
+            return True
+    return False
+
+
+def _scrub_bedrock_tool_fields(body: dict[str, Any], caps: ModelCapabilities) -> dict[str, Any]:
+    tools = body.get("tools")
+    has_tools = isinstance(tools, list) and len(tools) > 0
+
+    if not has_tools:
+        body.pop("tools", None)
+        body.pop("tool_choice", None)
+        body.pop("parallel_tool_calls", None)
+
+        if _messages_reference_tools(body.get("messages")):
+            body["tools"] = [_DUMMY_TOOL.copy()]
+    else:
+        choice = body.get("tool_choice")
+        if isinstance(choice, dict):
+            choice_type = choice.get("type")
+        elif isinstance(choice, str):
+            choice_type = choice
+        else:
+            choice_type = None
+
+        if choice_type == "none":
+            body.pop("tools", None)
+            body.pop("tool_choice", None)
+            body.pop("parallel_tool_calls", None)
+        elif choice_type in ("any", "required"):
+            body["tool_choice"] = "auto"
+
+    body.pop("functions", None)
+    body.pop("function_call", None)
+    return body
+
+
+def _ensure_stream_usage(body: dict[str, Any], caps: ModelCapabilities) -> dict[str, Any]:
+    if body.get("stream") is True:
+        opts = body.get("stream_options")
+        if isinstance(opts, dict):
+            body["stream_options"] = {**opts, "include_usage": True}
+        else:
+            body["stream_options"] = {"include_usage": True}
+    return body
+
+
+def _strip_incompatible_thinking(body: dict[str, Any], caps: ModelCapabilities) -> dict[str, Any]:
+    """Reconcile a client-supplied ``thinking`` param with what the model accepts.
+
+    ``thinking`` is Anthropic-only. Open WebUI forwards unknown top-level params
+    verbatim, so sending it to an OpenAI-family model hard-fails with
+    400 ``unknown_parameter: 'thinking'``; it is dropped. Adaptive-only Claude
+    families reject ``type="enabled"`` just as hard, so that is coerced. Both
+    keep the request usable instead of guaranteeing a 400.
+    """
+    if "thinking" not in body:
+        return body
+
+    if not caps.supports_thinking:
+        body.pop("thinking", None)
+        logger.warning(
+            "Stripped client-supplied 'thinking' param for non-Anthropic model %r "
+            "(parameter is Anthropic-only and would be rejected upstream)",
+            body.get("model", ""),
+        )
+        return body
+
+    thinking = body.get("thinking")
+    if caps.requires_adaptive and isinstance(thinking, dict) and thinking.get("type") == "enabled":
+        body["thinking"] = {"type": "adaptive"}
+        logger.warning(
+            "Coerced client-supplied thinking.type='enabled' to 'adaptive' for %r "
+            "(family rejects enabled thinking; use output_config.effort for depth)",
+            body.get("model", ""),
+        )
+
+    return body
+
+
+def _strip_incompatible_reasoning_effort(body: dict[str, Any], caps: ModelCapabilities) -> dict[str, Any]:
+    """Drop every reasoning/verbosity control for models whose upstream rejects them."""
+    if caps.accepts_reasoning_controls:
+        return body
+
+    dropped = [field for field in _REASONING_CONTROL_FIELDS if field in body]
+    if not dropped:
+        return body
+
+    for field in dropped:
+        body.pop(field, None)
+    logger.warning(
+        "Stripped %s for %r: this family is served via Bedrock Converse, which "
+        "rejects reasoning and verbosity controls (depth stays at the default)",
+        ", ".join(repr(field) for field in dropped),
+        body.get("model", ""),
+    )
+    return body
+
+
+def _strip_unsupported_fields(body: dict[str, Any], caps: ModelCapabilities) -> dict[str, Any]:
+    for field in _UNSUPPORTED_FIELDS:
+        body.pop(field, None)
+    return body
+
+
+def _inject_chat_id(body: dict[str, Any], caps: ModelCapabilities) -> dict[str, Any]:
+    """Inject a ``local:``-prefixed ephemeral chat_id.
+
+    Open WebUI 0.9.x requires a non-None ``chat_id`` string (``NoneType.startswith``
+    crash). The ``local:`` prefix tells it to skip all DB persistence — no
+    conversation rows, no ownership checks, no history lookup.
+    """
+    body["chat_id"] = f"local:{uuid.uuid4()}"
+    return body
+
+
+def _strip_session_id(body: dict[str, Any], caps: ModelCapabilities) -> dict[str, Any]:
+    """Strip ``session_id`` to prevent Open WebUI multi-model fan-out.
+
+    With ``session_id`` present it routes through its WebSocket task pool. The
+    proxy holds no WebSocket connection, so fan-out would hang.
+    """
+    body.pop("session_id", None)
+    return body
+
+
+_PASSES: Final[tuple[Any, ...]] = (
+    _strip_unsupported_fields,
+    _strip_incompatible_thinking,
+    _strip_incompatible_reasoning_effort,
+    _scrub_bedrock_tool_fields,
+    _ensure_stream_usage,
+    _inject_chat_id,
+    _strip_session_id,
+)
+
+
+def rewrite_chat_body(body: dict[str, Any]) -> dict[str, Any]:
+    """Apply every gateway requirement to a canonical chat body.
+
+    Order matters: thinking reconciliation runs before the reasoning-control
+    strip so an adaptive coercion can still be removed for families that reject
+    all controls, and tool scrubbing runs before stream-usage injection.
+    """
+    caps = capabilities_for(body.get("model", ""))
+    rewritten = {**body}
+    for apply_pass in _PASSES:
+        rewritten = apply_pass(rewritten, caps)
+    return rewritten
+
+
+def split_body_for_sdk(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split into (sdk_kwargs, extra_body) based on ``SDK_KNOWN_PARAMS``."""
+    sdk_kwargs: dict[str, Any] = {}
+    extra: dict[str, Any] = {}
+    for key, value in body.items():
+        if key in SDK_KNOWN_PARAMS:
+            sdk_kwargs[key] = value
+        else:
+            extra[key] = value
+    return sdk_kwargs, extra
+
+
+def prepare_chat_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Rewrite a canonical chat body and split it for the SDK."""
+    return split_body_for_sdk(rewrite_chat_body(body))

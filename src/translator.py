@@ -1,5 +1,5 @@
 # Backward-compatibility re-export — canonical location is src.proxy.openai.translator
-from .errors import create_openai_error  # noqa: F401
+from .proxy.openai.errors import create_openai_error  # noqa: F401
 from .proxy.openai.translator import (  # noqa: F401
     ADAPTIVE_THINKING_CONFIG,
     EXTENDED_THINKING_CONFIG,

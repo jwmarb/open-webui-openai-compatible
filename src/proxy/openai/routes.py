@@ -15,8 +15,10 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ...auth import get_current_token, request_refresh, should_refresh
-from ...errors import classify_upstream_error, create_openai_error, log_upstream_error
+from ...errors import classify_upstream_error, log_upstream_error
+from ...open_webui.request_policy import split_body_for_sdk
 from ...settings import settings
+from .errors import create_openai_error
 from .translator import (
     apply_thinking_params,
     resolve_thinking_model,
@@ -31,32 +33,9 @@ _SSE_HEADERS: Final[dict[str, str]] = {
     "X-Accel-Buffering": "no",
 }
 
-# Fields the openai SDK's chat.completions.create() accepts as explicit keyword
-# args.  Everything else in the rewritten body goes into ``extra_body``.
-_SDK_KNOWN_PARAMS: Final[frozenset[str]] = frozenset({
-    "model", "messages", "stream",
-    "frequency_penalty", "logit_bias", "logprobs", "top_logprobs",
-    "max_tokens", "max_completion_tokens", "n", "presence_penalty",
-    "response_format", "seed", "stop", "temperature", "top_p",
-    "tools", "tool_choice", "parallel_tool_calls", "user",
-    "stream_options", "metadata", "store", "service_tier",
-})
-
 _RETRY_BACKOFF_CAP: Final[int] = 120
 
 router = APIRouter()
-
-
-def _split_body_for_sdk(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Split into (sdk_kwargs, extra_body) based on ``_SDK_KNOWN_PARAMS``."""
-    sdk_kwargs: dict[str, Any] = {}
-    extra: dict[str, Any] = {}
-    for key, value in body.items():
-        if key in _SDK_KNOWN_PARAMS:
-            sdk_kwargs[key] = value
-        else:
-            extra[key] = value
-    return sdk_kwargs, extra
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +207,7 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
                  body.get("model"), is_stream)
 
     ai_client: openai.AsyncOpenAI = request.app.state.openai_client
-    sdk_kwargs, extra = _split_body_for_sdk(body)
+    sdk_kwargs, extra = split_body_for_sdk(body)
 
     if is_stream:
         return await _handle_streaming(ai_client, sdk_kwargs, extra)
