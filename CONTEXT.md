@@ -38,9 +38,10 @@ value, produced by `capabilities_for()`.
 **Model family** — a group of models sharing a request surface: `claude`,
 `fable`, `mythos` are Anthropic families. Detected by a positive allowlist.
 
-**Thinking variant** — a virtual model ID formed by appending `:extended` or
-`:adaptive`. Advertised in `/v1/models`, resolved and stripped before the
-request goes upstream. A variant is never a real upstream model ID.
+**Thinking variant** — a virtual model ID formed by appending `:adaptive`.
+Advertised in `/v1/models`, resolved and stripped before the request goes
+upstream. A variant is never a real upstream model ID. `:extended` was a second
+variant; it was removed and is no longer recognised.
 
 **Stream lifecycle** — the ordered SSE events of one response. On the Anthropic
 side `StreamingState` owns it end to end: exactly one `message_start`, blocks

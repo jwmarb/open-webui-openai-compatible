@@ -10,14 +10,14 @@ from src.open_webui.capabilities import (
 
 
 class TestSplitThinkingSuffix:
-    def test_extended_suffix(self):
-        assert split_thinking_suffix("claude-x:extended") == ("claude-x", ":extended")
-
     def test_adaptive_suffix(self):
         assert split_thinking_suffix("claude-x:adaptive") == ("claude-x", ":adaptive")
 
     def test_no_suffix(self):
         assert split_thinking_suffix("claude-x") == ("claude-x", None)
+
+    def test_extended_suffix_is_no_longer_recognised(self):
+        assert split_thinking_suffix("claude-x:extended") == ("claude-x:extended", None)
 
 
 class TestNormalizeModelId:
@@ -31,7 +31,7 @@ class TestNormalizeModelId:
             assert capabilities_for(model).is_anthropic is True
 
     def test_suffix_removed_before_normalizing(self):
-        assert normalize_model_id("Claude-Opus:extended") == "claude-opus"
+        assert normalize_model_id("Claude-Opus:adaptive") == "claude-opus"
 
 
 class TestAnthropicFamilyDetection:
@@ -88,14 +88,6 @@ class TestAdaptiveGates:
         assert caps.requires_adaptive is False
 
 
-class TestSmallContext:
-    def test_haiku_is_small_context(self):
-        assert capabilities_for("claude-3-5-haiku").small_context is True
-
-    def test_sonnet_is_not(self):
-        assert capabilities_for("claude-4-6-sonnet").small_context is False
-
-
 class TestReasoningControls:
     def test_gpt_5_6_rejects_reasoning_controls(self):
         assert capabilities_for("gpt-5.6-sol").accepts_reasoning_controls is False
@@ -113,4 +105,4 @@ class TestReasoningControls:
 
 class TestBaseModel:
     def test_base_model_excludes_suffix(self):
-        assert capabilities_for("claude-x:extended").base_model == "claude-x"
+        assert capabilities_for("claude-x:adaptive").base_model == "claude-x"

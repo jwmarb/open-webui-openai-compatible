@@ -681,10 +681,8 @@ class TestMessagesThinkingSuffix:
                         "messages": [{"role": "user", "content": "Hi"}],
                     },
                 )
-        assert captured["model"] == "claude-sonnet-4-20250514"
-        assert captured.get("extra_body", {}).get("thinking") == {
-            "type": "enabled", "budget_tokens": 32_000,
-        }
+        assert captured["model"] == "claude-sonnet-4-20250514:extended"
+        assert "thinking" not in captured.get("extra_body", {})
 
     def test_adaptive_suffix_is_stripped_before_upstream(self):
         captured: dict = {}
@@ -720,7 +718,7 @@ class TestMessagesThinkingSuffix:
                 tc.post(
                     "/v1/messages",
                     json={
-                        "model": "gpt-4o:extended",
+                        "model": "gpt-4o:adaptive",
                         "max_tokens": 100,
                         "messages": [{"role": "user", "content": "Hi"}],
                     },

@@ -44,11 +44,11 @@ Backend policy moved out. Nothing here re-derives a model family, and no private
 
 142 lines. Thinking variants and model-list translation only.
 
-- `generate_thinking_variants` (`:48`): appends `:extended` for any Anthropic family, plus `:adaptive` when `capabilities_for(id).supports_adaptive`.
-- `resolve_thinking_model` (`:74`): strips the suffix and returns the config. A refused suffix is STILL stripped (returns the base, config `None`) so the request does not 404 upstream on a synthetic model ID. On an adaptive-only family `:extended` resolves to `ADAPTIVE_THINKING_CONFIG` rather than an enabled budget, keeping the suffix usable instead of guaranteeing a 400.
-- `apply_thinking_params` (`:110`): injects `thinking` and raises `max_tokens` to a floor (`MIN_MAX_TOKENS_EXTENDED` 64k, `MIN_MAX_TOKENS_EXTENDED_SMALL` 32k for Haiku).
+- `generate_thinking_variants`: appends `:adaptive` only, and only when `capabilities_for(id).supports_adaptive`. Models that reject adaptive (Claude <= 4.5, Haiku) get NO variant.
+- `resolve_thinking_model`: strips `:adaptive` and returns the config. A refused suffix is STILL stripped (returns the base, config `None`) so the request does not 404 upstream on a synthetic model ID. `:extended` is no longer a suffix — it is not split off, so it passes through as part of the model ID and 400s upstream.
+- `apply_thinking_params`: injects `thinking` and raises `max_tokens` to `MIN_MAX_TOKENS_ADAPTIVE` (64k). The gateway rejects a limit too small to hold a thinking block.
 - `translate_models_response` (`:126`): reshapes `GET /api/models` into `/v1/models` and appends variants per model.
-- Thinking configs: `EXTENDED_THINKING_CONFIG` (32k budget), `EXTENDED_THINKING_CONFIG_SMALL` (16k, Haiku), `ADAPTIVE_THINKING_CONFIG`.
+- One thinking config: `ADAPTIVE_THINKING_CONFIG`. `ThinkingConfig.type` is `Literal["adaptive"]` — there is no budget field, because only adaptive is generated. The budget constants and the Haiku `small_context` gate were removed with `:extended`.
 
 All family questions go through `capabilities_for()`. This module contains no regex, no version parsing, and no family token set.
 

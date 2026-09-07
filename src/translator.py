@@ -2,12 +2,8 @@
 from .proxy.openai.errors import create_openai_error  # noqa: F401
 from .proxy.openai.translator import (  # noqa: F401
     ADAPTIVE_THINKING_CONFIG,
-    EXTENDED_THINKING_CONFIG,
-    EXTENDED_THINKING_CONFIG_SMALL,
-    MIN_MAX_TOKENS_EXTENDED,
-    MIN_MAX_TOKENS_EXTENDED_SMALL,
+    MIN_MAX_TOKENS_ADAPTIVE,
     THINKING_SUFFIX_ADAPTIVE,
-    THINKING_SUFFIX_EXTENDED,
     apply_thinking_params,
     generate_thinking_variants,
     resolve_thinking_model,

@@ -58,7 +58,7 @@ class TestTranslateModelsResponse:
         ids = [m["id"] for m in result["data"]]
         assert "gpt-4" in ids
         assert "claude-3" in ids
-        assert "claude-3:extended" in ids
+        assert "claude-3:extended" not in ids
         assert "claude-3:adaptive" not in ids
         assert "mistral-7b" in ids
         assert result["data"][0]["id"] == "gpt-4"
@@ -370,34 +370,39 @@ class TestGenerateThinkingVariants:
         model = OpenAIModel(id="gpt-4", owned_by="OpenAI")
         assert generate_thinking_variants(model) == []
 
-    def test_claude_opus_gets_extended_and_adaptive(self):
+    def test_claude_opus_gets_adaptive_only(self):
         model = OpenAIModel(id="bedrock-claude-4-6-opus")
-        variants = generate_thinking_variants(model)
-        ids = [v.id for v in variants]
-        assert ids == ["bedrock-claude-4-6-opus:extended", "bedrock-claude-4-6-opus:adaptive"]
+        assert [v.id for v in generate_thinking_variants(model)] == ["bedrock-claude-4-6-opus:adaptive"]
 
-    def test_claude_4_6_sonnet_gets_extended_and_adaptive(self):
+    def test_claude_4_6_sonnet_gets_adaptive_only(self):
         model = OpenAIModel(id="bedrock-claude-4-6-sonnet")
-        variants = generate_thinking_variants(model)
-        ids = [v.id for v in variants]
-        assert ids == ["bedrock-claude-4-6-sonnet:extended", "bedrock-claude-4-6-sonnet:adaptive"]
+        assert [v.id for v in generate_thinking_variants(model)] == ["bedrock-claude-4-6-sonnet:adaptive"]
 
-    def test_claude_4_5_sonnet_gets_extended_only(self):
+    def test_claude_5_opus_gets_adaptive(self):
+        model = OpenAIModel(id="bedrock-claude-5-opus")
+        assert [v.id for v in generate_thinking_variants(model)] == ["bedrock-claude-5-opus:adaptive"]
+
+    def test_claude_4_5_sonnet_gets_no_variants(self):
         model = OpenAIModel(id="bedrock-claude-4-5-sonnet")
-        variants = generate_thinking_variants(model)
-        ids = [v.id for v in variants]
-        assert ids == ["bedrock-claude-4-5-sonnet:extended"]
+        assert generate_thinking_variants(model) == []
 
-    def test_claude_haiku_gets_extended_only(self):
+    def test_claude_haiku_gets_no_variants(self):
         model = OpenAIModel(id="bedrock-claude-4-5-haiku")
-        variants = generate_thinking_variants(model)
-        ids = [v.id for v in variants]
-        assert ids == ["bedrock-claude-4-5-haiku:extended"]
+        assert generate_thinking_variants(model) == []
+
+    def test_no_extended_variant_is_ever_offered(self):
+        for model_id in (
+            "bedrock-claude-4-6-opus",
+            "bedrock-claude-5-sonnet",
+            "bedrock-claude-4-5-haiku",
+            "claude-fable-5",
+        ):
+            ids = [v.id for v in generate_thinking_variants(OpenAIModel(id=model_id))]
+            assert not any(i.endswith(":extended") for i in ids)
 
     def test_variant_preserves_created_and_owned_by(self):
         model = OpenAIModel(id="bedrock-claude-4-6-opus", created=1700000000, owned_by="Anthropic")
-        variants = generate_thinking_variants(model)
-        for v in variants:
+        for v in generate_thinking_variants(model):
             assert v.created == 1700000000
             assert v.owned_by == "Anthropic"
             assert v.object == "model"
@@ -405,15 +410,16 @@ class TestGenerateThinkingVariants:
     def test_models_response_includes_variants(self):
         raw = {
             "data": [
+                {"id": "bedrock-claude-4-6-opus", "owned_by": ""},
                 {"id": "bedrock-claude-4-5-haiku", "owned_by": ""},
                 {"id": "gpt-4", "owned_by": "OpenAI"},
             ]
         }
-        result = translate_models_response(raw)
-        ids = [m["id"] for m in result["data"]]
+        ids = [m["id"] for m in translate_models_response(raw)["data"]]
         assert ids == [
+            "bedrock-claude-4-6-opus",
+            "bedrock-claude-4-6-opus:adaptive",
             "bedrock-claude-4-5-haiku",
-            "bedrock-claude-4-5-haiku:extended",
             "gpt-4",
         ]
 
@@ -424,69 +430,34 @@ class TestResolveThinkingModel:
         assert base == "bedrock-claude-4-6-opus"
         assert config is None
 
-    def test_extended_suffix_stripped(self):
-        base, config = resolve_thinking_model("bedrock-claude-4-6-opus:extended")
-        assert base == "bedrock-claude-4-6-opus"
-        assert config is not None
-        assert config.type == "enabled"
-        assert config.budget_tokens == 32000
-
     def test_adaptive_suffix_stripped(self):
         base, config = resolve_thinking_model("bedrock-claude-4-6-sonnet:adaptive")
         assert base == "bedrock-claude-4-6-sonnet"
         assert config == ThinkingConfig(type="adaptive")
 
-    def test_haiku_extended_gets_smaller_budget(self):
-        base, config = resolve_thinking_model("bedrock-claude-4-5-haiku:extended")
-        assert base == "bedrock-claude-4-5-haiku"
-        assert config is not None
-        assert config.budget_tokens == 16000
-
-    def test_adaptive_only_model_extended_downgrades_to_adaptive(self):
-        """Claude 5 hard-400s on thinking.type="enabled": '"thinking.type.enabled" is
-        not supported for this model. Use "thinking.type.adaptive" and
-        "output_config.effort"'. So ``:extended`` must resolve to adaptive here.
-        """
-        base, config = resolve_thinking_model("bedrock-claude-5-opus:extended")
-        assert base == "bedrock-claude-5-opus"
-        assert config == ThinkingConfig(type="adaptive")
-
-    def test_adaptive_only_sonnet_extended_downgrades_to_adaptive(self):
-        base, config = resolve_thinking_model("bedrock-claude-5-sonnet:extended")
-        assert base == "bedrock-claude-5-sonnet"
-        assert config == ThinkingConfig(type="adaptive")
-
-    def test_adaptive_only_model_adaptive_suffix_still_works(self):
+    def test_adaptive_only_model_adaptive_suffix_works(self):
         base, config = resolve_thinking_model("bedrock-claude-5-opus:adaptive")
         assert base == "bedrock-claude-5-opus"
         assert config == ThinkingConfig(type="adaptive")
 
-    def test_claude_4_6_extended_keeps_enabled_budget(self):
-        base, config = resolve_thinking_model("bedrock-claude-4-6-opus:extended")
-        assert base == "bedrock-claude-4-6-opus"
-        assert config == ThinkingConfig(type="enabled", budget_tokens=32000)
-
-    def test_claude_4_6_sonnet_extended_keeps_enabled_budget(self):
-        base, config = resolve_thinking_model("bedrock-claude-4-6-sonnet:extended")
-        assert config == ThinkingConfig(type="enabled", budget_tokens=32000)
-
-    def test_fable_extended_downgrades_to_adaptive(self):
-        base, config = resolve_thinking_model("claude-fable-5:extended")
+    def test_fable_adaptive_works(self):
+        base, config = resolve_thinking_model("claude-fable-5:adaptive")
         assert base == "claude-fable-5"
         assert config == ThinkingConfig(type="adaptive")
 
-    def test_claude_4_7_extended_downgrades_to_adaptive(self):
-        base, config = resolve_thinking_model("bedrock-claude-4-7-opus:extended")
-        assert config == ThinkingConfig(type="adaptive")
-
-    def test_non_claude_with_colon_unchanged(self):
-        base, config = resolve_thinking_model("some-model:v2")
-        assert base == "some-model:v2"
+    def test_extended_suffix_is_not_recognised_and_passes_through(self):
+        base, config = resolve_thinking_model("bedrock-claude-4-6-opus:extended")
+        assert base == "bedrock-claude-4-6-opus:extended"
         assert config is None
 
-    def test_non_claude_extended_suffix_yields_no_thinking(self):
-        base, config = resolve_thinking_model("gpt-4:extended")
-        assert base == "gpt-4"
+    def test_adaptive_on_unsupported_model_strips_suffix_without_thinking(self):
+        base, config = resolve_thinking_model("bedrock-claude-4-5-haiku:adaptive")
+        assert base == "bedrock-claude-4-5-haiku"
+        assert config is None
+
+    def test_adaptive_on_claude_4_5_strips_suffix_without_thinking(self):
+        base, config = resolve_thinking_model("bedrock-claude-4-5-sonnet:adaptive")
+        assert base == "bedrock-claude-4-5-sonnet"
         assert config is None
 
     def test_non_claude_adaptive_suffix_yields_no_thinking(self):
@@ -494,63 +465,38 @@ class TestResolveThinkingModel:
         assert base == "gpt-4"
         assert config is None
 
-    def test_openai_model_extended_suffix_yields_no_thinking(self):
-        base, config = resolve_thinking_model("openai.gpt-5.6-luna:extended")
+    def test_openai_model_adaptive_suffix_yields_no_thinking(self):
+        base, config = resolve_thinking_model("openai.gpt-5.6-luna:adaptive")
         assert base == "openai.gpt-5.6-luna"
-        assert config is None
-
-    def test_claude_4_5_adaptive_suffix_yields_no_thinking(self):
-        base, config = resolve_thinking_model("bedrock-claude-4-5-sonnet:adaptive")
-        assert base == "bedrock-claude-4-5-sonnet"
         assert config is None
 
 
 class TestApplyThinkingParams:
     def test_injects_thinking_config(self):
-        body = {"model": "opus", "messages": []}
-        result = apply_thinking_params(body, ThinkingConfig(type="enabled", budget_tokens=32000))
-        assert result["thinking"] == {"type": "enabled", "budget_tokens": 32000}
+        body = apply_thinking_params({"model": "m"}, ThinkingConfig(type="adaptive"))
+        assert body["thinking"] == {"type": "adaptive"}
 
     def test_bumps_max_tokens_when_too_low(self):
-        body = {"model": "opus", "messages": [], "max_tokens": 100}
-        result = apply_thinking_params(body, ThinkingConfig(type="enabled", budget_tokens=32000))
-        assert result["max_tokens"] == 64000
+        body = apply_thinking_params({"model": "m", "max_tokens": 100}, ThinkingConfig(type="adaptive"))
+        assert body["max_tokens"] == 64000
 
     def test_preserves_max_tokens_when_sufficient(self):
-        body = {"model": "opus", "messages": [], "max_tokens": 128000}
-        result = apply_thinking_params(body, ThinkingConfig(type="enabled", budget_tokens=32000))
-        assert result["max_tokens"] == 128000
+        body = apply_thinking_params({"model": "m", "max_tokens": 100000}, ThinkingConfig(type="adaptive"))
+        assert body["max_tokens"] == 100000
 
     def test_sets_max_tokens_when_missing(self):
-        body = {"model": "opus", "messages": []}
-        result = apply_thinking_params(body, ThinkingConfig(type="enabled", budget_tokens=32000))
-        assert result["max_tokens"] == 64000
-
-    def test_adaptive_sets_min_max_tokens(self):
-        body = {"model": "opus", "messages": []}
-        result = apply_thinking_params(body, ThinkingConfig(type="adaptive"))
-        assert result["max_tokens"] == 64000
-
-    def test_haiku_smaller_min_max_tokens(self):
-        body = {"model": "haiku", "messages": [], "max_tokens": 100}
-        result = apply_thinking_params(body, ThinkingConfig(type="enabled", budget_tokens=16000))
-        assert result["max_tokens"] == 32000
+        body = apply_thinking_params({"model": "m"}, ThinkingConfig(type="adaptive"))
+        assert body["max_tokens"] == 64000
 
     def test_does_not_mutate_original(self):
-        body = {"model": "opus", "messages": []}
-        apply_thinking_params(body, ThinkingConfig(type="adaptive"))
-        assert "thinking" not in body
+        original = {"model": "m", "max_tokens": 10}
+        apply_thinking_params(original, ThinkingConfig(type="adaptive"))
+        assert original == {"model": "m", "max_tokens": 10}
 
-    def test_uses_max_completion_tokens_when_max_tokens_absent(self):
-        body = {"model": "opus", "messages": [], "max_completion_tokens": 100}
-        result = apply_thinking_params(body, ThinkingConfig(type="enabled", budget_tokens=32000))
-        assert result["max_tokens"] == 64000
-        assert result["max_completion_tokens"] == 100
-
-    def test_max_tokens_zero_treated_as_unset(self):
-        body = {"model": "opus", "messages": [], "max_tokens": 0}
-        result = apply_thinking_params(body, ThinkingConfig(type="enabled", budget_tokens=32000))
-        assert result["max_tokens"] == 64000
+    def test_respects_max_completion_tokens(self):
+        body = apply_thinking_params(
+            {"model": "m", "max_completion_tokens": 100000}, ThinkingConfig(type="adaptive"))
+        assert "max_tokens" not in body or body["max_tokens"] == 100000
 
 
 class TestBedrockToolScrubbing:

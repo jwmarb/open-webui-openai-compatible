@@ -119,28 +119,28 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 
 Replace `llama3` with a model name that exists in your Open WebUI instance. The streaming endpoint returns Server-Sent Events (`text/event-stream`).
 
-### Claude Thinking Variants 🧠
+### Claude Thinking Variant 🧠
 
-For Claude models, the proxy auto-generates virtual thinking variants in the `/v1/models` list. These let you enable Claude's extended thinking without manually injecting `thinking` parameters:
+For capable Claude models, the proxy auto-generates one virtual thinking variant in the `/v1/models` list, so you can turn on thinking without hand-injecting a `thinking` parameter:
 
 | Suffix | Effect | Example |
 |--------|--------|---------|
-| `:extended` | `thinking.type=enabled` with a token budget | `claude-sonnet-4-20250514:extended` |
-| `:adaptive` | `thinking.type=adaptive` (model decides when to think) | `claude-sonnet-4-20250514:adaptive` |
+| `:adaptive` | `thinking.type=adaptive` (model decides when and how deeply to think) | `claude-sonnet-4-6:adaptive` |
 
 Use the variant name as your `model` value — the proxy strips the suffix and injects the right parameters before forwarding upstream.
 
 ```bash
-# Chat with extended thinking
+# Chat with adaptive thinking
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"claude-sonnet-4-20250514:extended","messages":[{"role":"user","content":"Explain the Riemann hypothesis"}],"stream":true}'
+  -d '{"model":"claude-sonnet-4-6:adaptive","messages":[{"role":"user","content":"Explain the Riemann hypothesis"}],"stream":true}'
 ```
 
 **Notes:**
-- `:extended` is available for all Anthropic-family models. Haiku gets a smaller budget (16k tokens vs 32k).
-- `:adaptive` requires Opus/Sonnet 4.6 or newer (or a `fable`/`mythos` model). Claude 4.5 and earlier — including Haiku — accept only `thinking.type=enabled` and reject adaptive upstream, so the variant is not offered for them.
-- The proxy automatically sets `max_tokens` high enough for thinking to work (64k standard, 32k for Haiku).
+- `:adaptive` requires Opus/Sonnet 4.6 or newer (or a `fable`/`mythos` model). Claude 4.5 and earlier — including Haiku — reject adaptive upstream, so no variant is offered for them and they get no thinking suffix at all.
+- The proxy raises `max_tokens` to 64k when injecting thinking, since the gateway rejects a limit too small to hold a thinking block.
+- **A `:extended` suffix is no longer recognised.** It was removed; sending `model:extended` now reaches upstream verbatim and returns `400 Model not found`. Use `:adaptive`, or send `thinking` yourself.
+- Thinking content that the model returns on its own is still translated back to clients — this only removes the proxy-generated request variant.
 - The `thinking` parameter is Anthropic-only. If you send it for a non-Anthropic model (e.g. a GPT model), the proxy strips it and logs a warning — without this, the provider rejects the request with `400 unknown_parameter: 'thinking'`.
 - To control reasoning depth on OpenAI reasoning models, send the standard `reasoning_effort` string (`low`/`medium`/`high`, plus `xhigh` and `none` on newer models). The proxy passes it through untouched, and Open WebUI supports it natively. Note that valid values are model-dependent — `minimal` is rejected by GPT-5.5 and GPT-5.6, and non-reasoning models such as `gpt-4o` reject the parameter entirely.
 

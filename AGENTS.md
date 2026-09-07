@@ -168,7 +168,7 @@ When adding a **required** settings field, update `tests/conftest.py` and the CI
 ## Request flow
 
 1. Client sends an OpenAI-compatible request, or an Anthropic one which `translate_request()` converts into a **canonical body** first.
-2. The frontend resolves any **thinking variant** — `resolve_thinking_model()` strips `:extended`/`:adaptive` and returns a config; `apply_thinking_params()` injects `thinking` and raises `max_tokens` to a floor. **Both** frontends do this.
+2. The frontend resolves any **thinking variant** — `resolve_thinking_model()` strips `:adaptive` and returns a config; `apply_thinking_params()` injects `thinking` and raises `max_tokens` to a floor. **Both** frontends do this.
 3. `prepare_chat_body()` (`request_policy.py:234`) applies the seven **rewrite passes** and splits the result into SDK kwargs vs `extra_body` on `SDK_KNOWN_PARAMS`.
 4. `AsyncOpenAI.chat.completions.create()` forwards upstream.
 5. Chat responses pass through, or are translated back for Anthropic; only the model list is reshaped.
@@ -191,18 +191,18 @@ Mid-stream failures (headers already sent) emit an error event then terminate. A
 
 Error mapping: `APIStatusError` → preserve status · `APITimeoutError` → 504 · `APIConnectionError` → 502 · anything else → 502.
 
-## Claude thinking variants
+## Claude thinking variant
 
-Models from an Anthropic family (`claude`, `fable`, `mythos` in the ID) get virtual variants appended to `/v1/models`: `:extended` and `:adaptive`. The suffix is stripped before forwarding by **both** frontends.
+Models that accept adaptive thinking get ONE virtual variant appended to `/v1/models`: `:adaptive`. The suffix is stripped before forwarding by **both** frontends. `:extended` was removed — it is no longer generated or recognised, so `model:extended` now reaches upstream verbatim and 400s.
 
 Two distinct capability gates, and they are NOT the same line:
 
-| Gate | Meaning | Applies to |
-| --- | --- | --- |
-| `supports_adaptive` | model ACCEPTS `type="adaptive"` | Opus/Sonnet >= 4.6, `fable`, `mythos` |
-| `requires_adaptive` | model REJECTS `type="enabled"` | Opus/Sonnet >= **4.7**, `fable`, `mythos` |
+| Gate | Meaning | Applies to | Used by |
+| --- | --- | --- | --- |
+| `supports_adaptive` | model ACCEPTS `type="adaptive"` | Opus/Sonnet >= 4.6, `fable`, `mythos` | variant generation + suffix resolution |
+| `requires_adaptive` | model REJECTS `type="enabled"` | Opus/Sonnet >= **4.7**, `fable`, `mythos` | coercing a CLIENT-supplied `thinking` |
 
-Claude 4.6 accepts BOTH modes; 4.7+ accepts ONLY adaptive. Verified against genai.arizona.edu. Do not collapse these two. Rationale: [ADR-0004](docs/adr/0004-model-capability-inference.md).
+Claude 4.6 accepts BOTH modes; 4.7+ accepts ONLY adaptive. `requires_adaptive` is still load-bearing without `:extended`, because a client may send `thinking.type="enabled"` itself. Verified against genai.arizona.edu. Do not collapse these two. Rationale: [ADR-0004](docs/adr/0004-model-capability-inference.md).
 
 A client-supplied `thinking` param is stripped for non-Anthropic models (it is Anthropic-only and Open WebUI forwards unknown top-level params verbatim, producing `400 unknown_parameter: 'thinking'`). On adaptive-only families a client-supplied `type="enabled"` is coerced to `{"type": "adaptive"}`.
 

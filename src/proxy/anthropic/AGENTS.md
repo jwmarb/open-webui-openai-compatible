@@ -9,7 +9,7 @@ Vocabulary: [`CONTEXT.md`](../../../CONTEXT.md).
 `routes.py:76-103`, in this order — the order is load-bearing:
 
 1. `translate_request(raw_body)` → canonical (OpenAI-shaped) body.
-2. `resolve_thinking_model()` + `apply_thinking_params()` — strips `:extended`/`:adaptive` and injects the thinking config. **Without this the suffix reached upstream as a literal model ID and 404'd.**
+2. `resolve_thinking_model()` + `apply_thinking_params()` — strips `:adaptive` and injects the thinking config. **Without this the suffix reached upstream as a literal model ID and 404'd.** `:extended` is no longer recognised anywhere.
 3. `prepare_chat_body()` → the seven **rewrite passes** plus the SDK/`extra_body` split, in one call.
 4. `_handle_streaming` (`:107`) or `_handle_non_streaming` (`:189`).
 

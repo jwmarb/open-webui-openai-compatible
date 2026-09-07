@@ -26,8 +26,7 @@ class OpenAIModelList(BaseModel):
 class ThinkingConfig(BaseModel):
     """Claude thinking configuration injected into chat completion requests."""
 
-    type: Literal["enabled", "adaptive"]
-    budget_tokens: int | None = None
+    type: Literal["adaptive"] = "adaptive"
 
 
 class OpenAIErrorDetail(BaseModel):

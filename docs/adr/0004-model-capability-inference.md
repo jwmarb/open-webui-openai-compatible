@@ -18,7 +18,9 @@ rather than a warning.
 unified to `-` — so `anthropic.claude-x` and `bedrock_claude_x` agree.
 
 **`supports_adaptive` and `requires_adaptive` are separate gates and must not be
-collapsed.** Opus/Sonnet >= 4.6 *accept* `thinking.type="adaptive"`. Opus/Sonnet
+collapsed** — even though only the `:adaptive` variant remains. `supports_adaptive`
+gates variant generation; `requires_adaptive` coerces a *client-supplied*
+`thinking.type="enabled"`, which arrives independently of any variant. Opus/Sonnet >= 4.6 *accept* `thinking.type="adaptive"`. Opus/Sonnet
 >= 4.7 additionally *reject* `thinking.type="enabled"`. Claude 4.6 therefore
 accepts both modes while 4.7+ accepts only adaptive. Verified against
 genai.arizona.edu: `claude-4-6-opus` and `claude-4-6-sonnet` return 200 for
@@ -29,7 +31,10 @@ enabled thinking; `claude-5-opus` returns 400 demanding adaptive.
 
 ## Consequences
 
-- Both frontends resolve thinking variants the same way.
+- Both frontends resolve the `:adaptive` variant the same way.
+- The `:extended` variant was removed, along with the thinking budgets and the
+  Haiku `small_context` gate that existed only to size those budgets. Nothing
+  else depended on them.
 - A new Anthropic family is one entry in one frozenset.
 - The rules are empirical and will drift as the gateway changes. They belong in
   one module with tests, not spread across request-rewriting passes.

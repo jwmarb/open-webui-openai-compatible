@@ -5,8 +5,9 @@ exposes no capability metadata, so the model ID is the only available signal
 and every rule here is empirical — verified against the live gateway and
 recorded in `docs/adr/0004-model-capability-inference.md`.
 
-`supports_adaptive` and `requires_adaptive` are deliberately distinct: Claude
-4.6 accepts both thinking modes, while 4.7+ accepts only adaptive.
+`supports_adaptive` gates the `:adaptive` thinking variant. `requires_adaptive`
+is separate and still needed even without variants: Claude 4.7+ rejects a
+client-supplied `thinking.type="enabled"`, which the request policy coerces.
 """
 
 from __future__ import annotations
@@ -18,13 +19,11 @@ from typing import Final
 __all__ = [
     "ModelCapabilities",
     "THINKING_SUFFIX_ADAPTIVE",
-    "THINKING_SUFFIX_EXTENDED",
     "capabilities_for",
     "normalize_model_id",
     "split_thinking_suffix",
 ]
 
-THINKING_SUFFIX_EXTENDED: Final[str] = ":extended"
 THINKING_SUFFIX_ADAPTIVE: Final[str] = ":adaptive"
 
 # Allowlist, not "not OpenAI": an unrecognised model must never receive a
@@ -51,7 +50,6 @@ class ModelCapabilities:
     is_anthropic: bool
     supports_adaptive: bool
     requires_adaptive: bool
-    small_context: bool
     accepts_reasoning_controls: bool
 
     @property
@@ -60,9 +58,8 @@ class ModelCapabilities:
 
 
 def split_thinking_suffix(model: str) -> tuple[str, str | None]:
-    for suffix in (THINKING_SUFFIX_EXTENDED, THINKING_SUFFIX_ADAPTIVE):
-        if model.endswith(suffix):
-            return model[: -len(suffix)], suffix
+    if model.endswith(THINKING_SUFFIX_ADAPTIVE):
+        return model[: -len(THINKING_SUFFIX_ADAPTIVE)], THINKING_SUFFIX_ADAPTIVE
     return model, None
 
 
@@ -96,6 +93,5 @@ def capabilities_for(model_id: str) -> ModelCapabilities:
         is_anthropic=is_anthropic,
         supports_adaptive=version >= _ADAPTIVE_MIN_VERSION,
         requires_adaptive=version >= _ADAPTIVE_ONLY_MIN_VERSION,
-        small_context="haiku" in normalized,
         accepts_reasoning_controls=not _REASONING_INCOMPATIBLE_RE.search(normalized),
     )

@@ -390,27 +390,6 @@ class TestChatCompletionsEndpoint:
                 body = response.json()
                 assert body["error"]["type"] == "timeout_error"
 
-    def test_chat_thinking_variant_extended_e2e(self):
-        captured: dict = {}
-
-        async def handler(**kwargs):
-            captured.update(kwargs)
-            return _completion(model="opus")
-
-        p_wc, p_oa = _patches(openai_handler=handler)
-        with p_wc, p_oa:
-            with TestClient(p_wc.build()) as tc:
-                response = tc.post(
-                    "/v1/chat/completions",
-                    json={"model": "bedrock-claude-4-6-opus:extended", "messages": [{"role": "user", "content": "Hi"}]},
-                )
-                assert response.status_code == 200
-                assert captured["model"] == "bedrock-claude-4-6-opus"
-                extra = captured.get("extra_body", {})
-                assert extra["thinking"]["type"] == "enabled"
-                assert extra["thinking"]["budget_tokens"] == 32000
-                assert captured["max_tokens"] >= 64000
-
     def test_chat_thinking_variant_adaptive_e2e(self):
         captured: dict = {}
 
@@ -544,7 +523,6 @@ class TestModelsThinkingVariants:
                 ids = [m["id"] for m in response.json()["data"]]
                 assert ids == [
                     "bedrock-claude-4-6-opus",
-                    "bedrock-claude-4-6-opus:extended",
                     "bedrock-claude-4-6-opus:adaptive",
                 ]
 
