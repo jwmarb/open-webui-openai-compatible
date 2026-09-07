@@ -12,7 +12,7 @@ Vocabulary: [`CONTEXT.md`](../../../CONTEXT.md).
 | Thinking-variant generation/resolution, model-list translation | `translator.py` |
 | OpenAI error body | `errors.py` |
 | Pydantic response shapes | `models.py` |
-| The seven rewrite passes, SDK split | `../../open_webui/request_policy.py` |
+| The eight rewrite passes, SDK split | `../../open_webui/request_policy.py` |
 | What a model accepts | `../../open_webui/capabilities.py` |
 
 ## What this package no longer owns
@@ -23,7 +23,7 @@ Backend policy moved out. Nothing here re-derives a model family, and no private
 |---|---|
 | `_SDK_KNOWN_PARAMS` (private) | `open_webui/request_policy.py:29` `SDK_KNOWN_PARAMS` (**public**) |
 | `_split_body_for_sdk` (private, imported by the Anthropic route) | `open_webui/request_policy.py:222` `split_body_for_sdk` |
-| The 7 rewrite passes + `rewrite_chat_body` | `open_webui/request_policy.py` |
+| The 8 rewrite passes + `rewrite_chat_body` | `open_webui/request_policy.py` |
 | 7 model-family predicates (`_is_claude_model`, `_supports_adaptive`, `_requires_adaptive`, `_adaptive_capability`, `_extract_version`, `_normalize_model_id`, `_is_small_context_claude`) | `open_webui/capabilities.py` → one `capabilities_for()` call |
 | `create_openai_error` (lived in `src/errors.py`) | `errors.py` in this package |
 | `_should_refresh_token`, `_extract_error_code`, `_trigger_refresh`, `_TOKEN_REJECTION_CODES`, `REFRESH_LOCK_PATH`, `PROJECT_ROOT`, `_REFRESH_SCRIPT` | `src/auth.py` (the token store) |

@@ -244,6 +244,66 @@ class TestStripIncompatibleThinking:
         result = rewrite_chat_body(body)
         assert result["reasoning_effort"] == "high"
 
+
+class TestStripIncompatibleEffortConfig:
+    def test_strips_effort_for_claude_4_5(self):
+        """Claude 4.5 and earlier answer output_config.effort with
+        400 "This model does not support the effort parameter."
+        """
+        body = {
+            "model": "bedrock-claude-4-5-haiku",
+            "messages": [],
+            "output_config": {"effort": "high"},
+        }
+        result = rewrite_chat_body(body)
+        assert "output_config" not in result
+
+    def test_preserves_effort_for_claude_4_6(self):
+        body = {
+            "model": "bedrock-claude-4-6-sonnet",
+            "messages": [],
+            "output_config": {"effort": "high"},
+        }
+        result = rewrite_chat_body(body)
+        assert result["output_config"] == {"effort": "high"}
+
+    def test_preserves_effort_for_claude_5(self):
+        body = {
+            "model": "bedrock-claude-5-sonnet",
+            "messages": [],
+            "output_config": {"effort": "high"},
+        }
+        result = rewrite_chat_body(body)
+        assert result["output_config"] == {"effort": "high"}
+
+    def test_sibling_format_survives_the_effort_strip(self):
+        """``format`` is not an effort control; it becomes ``response_format``."""
+        body = {
+            "model": "bedrock-claude-4-5-haiku",
+            "messages": [],
+            "output_config": {"effort": "high", "format": {"type": "json_schema"}},
+        }
+        result = rewrite_chat_body(body)
+        assert result["output_config"] == {"format": {"type": "json_schema"}}
+
+    def test_strips_output_config_wholesale_for_gpt_5_6(self):
+        body = {
+            "model": "openai.gpt-5.6-sol",
+            "messages": [],
+            "output_config": {"effort": "high"},
+        }
+        result = rewrite_chat_body(body)
+        assert "output_config" not in result
+
+    def test_non_anthropic_models_keep_output_config(self):
+        body = {
+            "model": "openai.gpt-oss-120b-1:0",
+            "messages": [],
+            "output_config": {"effort": "high"},
+        }
+        result = rewrite_chat_body(body)
+        assert result["output_config"] == {"effort": "high"}
+
     def test_reasoning_effort_strip_does_not_mutate_original(self):
         body = {"model": "openai.gpt-5.6-sol", "messages": [], "reasoning_effort": "high"}
         rewrite_chat_body(body)

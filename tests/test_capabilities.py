@@ -103,6 +103,33 @@ class TestReasoningControls:
         assert capabilities_for("claude-5-opus").accepts_reasoning_controls is True
 
 
+class TestEffortConfigGate:
+    def test_claude_4_5_rejects_effort_config(self):
+        assert capabilities_for("bedrock-claude-4-5-haiku").accepts_effort_config is False
+
+    def test_claude_3_rejects_effort_config(self):
+        assert capabilities_for("claude-3-5-sonnet").accepts_effort_config is False
+
+    def test_claude_4_6_accepts_effort_config(self):
+        assert capabilities_for("bedrock-claude-4-6-sonnet").accepts_effort_config is True
+
+    def test_claude_5_accepts_effort_config(self):
+        assert capabilities_for("bedrock-claude-5-opus").accepts_effort_config is True
+
+    def test_non_anthropic_models_are_not_gated(self):
+        for model in ("gpt-oss-120b", "google.gemma-4-31b", "bedrock-nova-pro-v1"):
+            assert capabilities_for(model).accepts_effort_config is True, model
+
+    def test_effort_gate_is_independent_of_adaptive_gates(self):
+        """4.6 accepts the field yet does not require adaptive thinking, so the
+        three gates cannot be collapsed into one comparison.
+        """
+        caps = capabilities_for("bedrock-claude-4-6-sonnet")
+        assert caps.accepts_effort_config is True
+        assert caps.supports_adaptive is True
+        assert caps.requires_adaptive is False
+
+
 class TestBaseModel:
     def test_base_model_excludes_suffix(self):
         assert capabilities_for("claude-x:adaptive").base_model == "claude-x"

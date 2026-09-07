@@ -33,7 +33,7 @@ A 401 without token evidence (e.g. `model_access_denied`) still passes through a
 
 517 lines. Request/response translation and the stream lifecycle.
 
-- `translate_request` (`:182`): Anthropic → canonical. Default `max_tokens` 4096. `top_k` passthrough. `output_config` maps to `effort` + `response_format` json_schema. system, tools, tool_choice, thinking all mapped.
+- `translate_request` (`:182`): Anthropic → canonical. Default `max_tokens` 4096. `top_k` passthrough. `output_config.effort` stays **nested** as `output_config: {effort}` — a bare top-level `effort` is rejected by every Bedrock model on the gateway (`effort: Extra inputs are not permitted`). `output_config.format` maps to `response_format` json_schema. system, tools, tool_choice, thinking all mapped.
 - `_map_finish_reason` (`:245`): `stop`→`end_turn`, `length`→`max_tokens`, `tool_calls`→`tool_use`, `content_filter`→`end_turn`, unknown→`end_turn`.
 - `translate_response` (`:257`): canonical → Anthropic. Upstream `thinking_blocks` keep their real `signature` values, so non-streaming multi-turn thinking works at full fidelity.
 - `create_anthropic_error` (`:24`): the Anthropic error body.

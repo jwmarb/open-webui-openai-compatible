@@ -44,6 +44,7 @@ _REASONING_CONTROL_FIELDS: Final[tuple[str, ...]] = (
     "verbosity",
     "textVerbosity",
     "thinking",
+    "output_config",
 )
 
 _DUMMY_TOOL: Final[dict[str, Any]] = {
@@ -167,6 +168,34 @@ def _strip_incompatible_reasoning_effort(body: dict[str, Any], caps: ModelCapabi
     return body
 
 
+def _strip_incompatible_effort_config(body: dict[str, Any], caps: ModelCapabilities) -> dict[str, Any]:
+    """Drop ``output_config.effort`` for Claude families that reject the field.
+
+    Claude 4.5 and earlier answer it with 400 "This model does not support the
+    effort parameter." 4.6 accepts and ignores it, 5.x honours it, so only the
+    old families need the strip. A sibling ``format`` key is preserved — it is
+    translated to ``response_format`` separately and is not an effort control.
+    """
+    if caps.accepts_effort_config:
+        return body
+
+    config = body.get("output_config")
+    if not isinstance(config, dict) or "effort" not in config:
+        return body
+
+    remaining = {key: value for key, value in config.items() if key != "effort"}
+    if remaining:
+        body["output_config"] = remaining
+    else:
+        body.pop("output_config", None)
+    logger.warning(
+        "Stripped output_config.effort for %r: this family rejects the effort "
+        "parameter (depth stays at the default)",
+        body.get("model", ""),
+    )
+    return body
+
+
 def _strip_unsupported_fields(body: dict[str, Any], caps: ModelCapabilities) -> dict[str, Any]:
     for field in _UNSUPPORTED_FIELDS:
         body.pop(field, None)
@@ -198,6 +227,7 @@ _PASSES: Final[tuple[Any, ...]] = (
     _strip_unsupported_fields,
     _strip_incompatible_thinking,
     _strip_incompatible_reasoning_effort,
+    _strip_incompatible_effort_config,
     _scrub_bedrock_tool_fields,
     _ensure_stream_usage,
     _inject_chat_id,
@@ -210,7 +240,9 @@ def rewrite_chat_body(body: dict[str, Any]) -> dict[str, Any]:
 
     Order matters: thinking reconciliation runs before the reasoning-control
     strip so an adaptive coercion can still be removed for families that reject
-    all controls, and tool scrubbing runs before stream-usage injection.
+    all controls, the effort-config strip runs after it so a family rejecting
+    every control has already lost ``output_config`` wholesale, and tool
+    scrubbing runs before stream-usage injection.
     """
     caps = capabilities_for(body.get("model", ""))
     rewritten = {**body}

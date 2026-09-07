@@ -28,7 +28,7 @@ but before backend policy. Both frontends produce one; `prepare_chat_body()`
 consumes it. The Anthropic frontend translates *into* canonical shape first.
 
 **Rewrite pass** — one transformation applied to a canonical body by
-`src/open_webui/request_policy.py`. There are seven and their order is
+`src/open_webui/request_policy.py`. There are eight and their order is
 load-bearing.
 
 **Capability** — what the gateway will accept for a given model, inferred from

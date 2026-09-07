@@ -230,7 +230,11 @@ def translate_request(body: dict[str, Any]) -> dict[str, Any]:
         if hasattr(oc, "model_dump"):
             oc = oc.model_dump(exclude_none=True)
         if oc.get("effort"):
-            openai_body["effort"] = oc["effort"]
+            # Nested, not a bare top-level ``effort``. Every Bedrock model on the
+            # gateway rejects the flat key with "effort: Extra inputs are not
+            # permitted"; the nested form is what upstream documents when it
+            # refuses thinking.type="enabled". Verified 2026-09-06.
+            openai_body["output_config"] = {"effort": oc["effort"]}
         if oc.get("format"):
             fmt = oc["format"]
             if fmt.get("type") == "json_schema":

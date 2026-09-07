@@ -297,7 +297,12 @@ class TestTranslateRequest:
         result = translate_request(body)
         assert result["metadata"] == {"user_id": "u123"}
 
-    def test_output_config_effort(self):
+    def test_output_config_effort_stays_nested(self):
+        """A bare top-level ``effort`` is rejected by every Bedrock model on the
+        gateway with "effort: Extra inputs are not permitted". Upstream names the
+        nested ``output_config.effort`` form itself when it refuses
+        ``thinking.type="enabled"``. Verified 2026-09-06.
+        """
         body = {
             "model": "m",
             "max_tokens": 100,
@@ -305,7 +310,22 @@ class TestTranslateRequest:
             "output_config": {"effort": "high"},
         }
         result = translate_request(body)
-        assert result["effort"] == "high"
+        assert result["output_config"] == {"effort": "high"}
+        assert "effort" not in result
+
+    def test_output_config_effort_and_format_together(self):
+        body = {
+            "model": "m",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "output_config": {
+                "effort": "low",
+                "format": {"type": "json_schema", "json_schema": {"type": "object"}},
+            },
+        }
+        result = translate_request(body)
+        assert result["output_config"] == {"effort": "low"}
+        assert result["response_format"]["type"] == "json_schema"
 
     def test_output_config_json_schema(self):
         body = {

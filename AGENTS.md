@@ -48,7 +48,7 @@ open-webui-openai-compatible/
 │   ├── translator.py     # Back-compat re-export → src.proxy.openai.translator
 │   ├── open_webui/       # BACKEND POLICY, shared by both frontends
 │   │   ├── capabilities.py    # capabilities_for() — one capability lookup
-│   │   └── request_policy.py  # 7 rewrite passes, SDK split
+│   │   └── request_policy.py  # 8 rewrite passes, SDK split
 │   └── proxy/
 │       ├── openai/       # GET /v1/models, POST /v1/chat/completions  → see its AGENTS.md
 │       └── anthropic/    # POST /v1/messages                         → see its AGENTS.md
@@ -169,11 +169,11 @@ When adding a **required** settings field, update `tests/conftest.py` and the CI
 
 1. Client sends an OpenAI-compatible request, or an Anthropic one which `translate_request()` converts into a **canonical body** first.
 2. The frontend resolves any **thinking variant** — `resolve_thinking_model()` strips `:adaptive` and returns a config; `apply_thinking_params()` injects `thinking` and raises `max_tokens` to a floor. **Both** frontends do this.
-3. `prepare_chat_body()` (`request_policy.py:234`) applies the seven **rewrite passes** and splits the result into SDK kwargs vs `extra_body` on `SDK_KNOWN_PARAMS`.
+3. `prepare_chat_body()` applies the eight **rewrite passes** and splits the result into SDK kwargs vs `extra_body` on `SDK_KNOWN_PARAMS`.
 4. `AsyncOpenAI.chat.completions.create()` forwards upstream.
 5. Chat responses pass through, or are translated back for Anthropic; only the model list is reshaped.
 
-The seven passes run in this exact order and the order is load-bearing: strip unsupported fields → reconcile incompatible `thinking` → strip incompatible reasoning controls → scrub Bedrock tool fields → inject stream usage → inject `chat_id` → strip `session_id`. Each receives a `ModelCapabilities` value rather than re-deriving the model family. Details in `src/proxy/openai/AGENTS.md`.
+The eight passes run in this exact order and the order is load-bearing: strip unsupported fields → reconcile incompatible `thinking` → strip incompatible reasoning controls → strip incompatible `output_config.effort` → scrub Bedrock tool fields → inject stream usage → inject `chat_id` → strip `session_id`. Each receives a `ModelCapabilities` value rather than re-deriving the model family. Details in `src/proxy/openai/AGENTS.md`.
 
 ## Streaming
 
@@ -195,14 +195,17 @@ Error mapping: `APIStatusError` → preserve status · `APITimeoutError` → 504
 
 Models that accept adaptive thinking get ONE virtual variant appended to `/v1/models`: `:adaptive`. The suffix is stripped before forwarding by **both** frontends. `:extended` was removed — it is no longer generated or recognised, so `model:extended` now reaches upstream verbatim and 400s.
 
-Two distinct capability gates, and they are NOT the same line:
+Three distinct capability gates, and they are NOT the same line:
 
 | Gate | Meaning | Applies to | Used by |
 | --- | --- | --- | --- |
 | `supports_adaptive` | model ACCEPTS `type="adaptive"` | Opus/Sonnet >= 4.6, `fable`, `mythos` | variant generation + suffix resolution |
 | `requires_adaptive` | model REJECTS `type="enabled"` | Opus/Sonnet >= **4.7**, `fable`, `mythos` | coercing a CLIENT-supplied `thinking` |
+| `accepts_effort_config` | model ACCEPTS `output_config.effort` | any non-Anthropic, or Claude >= **4.6** | stripping `output_config.effort` |
 
-Claude 4.6 accepts BOTH modes; 4.7+ accepts ONLY adaptive. `requires_adaptive` is still load-bearing without `:extended`, because a client may send `thinking.type="enabled"` itself. Verified against genai.arizona.edu. Do not collapse these two. Rationale: [ADR-0004](docs/adr/0004-model-capability-inference.md).
+Claude 4.6 accepts BOTH thinking modes; 4.7+ accepts ONLY adaptive. `requires_adaptive` is still load-bearing without `:extended`, because a client may send `thinking.type="enabled"` itself.
+
+`accepts_effort_config` lines up with neither: Claude 4.5 and earlier 400 on `output_config.effort` outright, 4.6 accepts it and silently IGNORES it, and only 5.x acts on it. The floor is 4.6 because accepting-and-ignoring is harmless while rejecting is not — so a 4.6 model both permits `type="enabled"` AND takes the effort config. Verified 2026-09-06 against genai.arizona.edu. Do not collapse these three. Rationale: [ADR-0004](docs/adr/0004-model-capability-inference.md).
 
 A client-supplied `thinking` param is stripped for non-Anthropic models (it is Anthropic-only and Open WebUI forwards unknown top-level params verbatim, producing `400 unknown_parameter: 'thinking'`). On adaptive-only families a client-supplied `type="enabled"` is coerced to `{"type": "adaptive"}`.
 
@@ -238,7 +241,7 @@ A client-supplied `thinking` param is stripped for non-Anthropic models (it is A
 
 | Issue | Location |
 |-------|----------|
-| `translate_request` maps Anthropic `output_config.effort` to a bare top-level `effort` key, which is not a documented upstream param. Suspect — verify against LiteLLM's Bedrock adapter before relying on it | `proxy/anthropic/translator.py` |
+| Structured output is broken upstream for Claude: the gateway rewrites `response_format` into `output_config.format`, which Bedrock rejects with `Extra inputs are not permitted`. Reproduces on BOTH frontends, so it is not a translation defect. Not worked around — see [`docs/upstream-compatibility.md`](docs/upstream-compatibility.md) | gateway |
 | `docs/architecture.{dot,svg,png}` predate the Anthropic frontend and the backend package: no `/v1/messages`, client labeled "OpenAI Client". Embedded in README | `docs/` |
 | Streaming thinking blocks carry a signature only when upstream sends one. Open WebUI does not always emit `thinking_blocks` mid-stream, so multi-turn replay fidelity is upstream-dependent | `proxy/anthropic/translator.py` |
 | `pytest-asyncio` is an unused dev dependency; there are zero `async def test_` functions | `pyproject.toml` |

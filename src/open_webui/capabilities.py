@@ -8,6 +8,8 @@ recorded in `docs/adr/0004-model-capability-inference.md`.
 `supports_adaptive` gates the `:adaptive` thinking variant. `requires_adaptive`
 is separate and still needed even without variants: Claude 4.7+ rejects a
 client-supplied `thinking.type="enabled"`, which the request policy coerces.
+`accepts_effort_config` is a third, independent line: Claude 4.5 and earlier
+reject `output_config.effort` outright.
 """
 
 from __future__ import annotations
@@ -35,6 +37,12 @@ _ADAPTIVE_ONLY_MIN_VERSION: Final[tuple[int, int]] = (4, 7)
 _ADAPTIVE_CAPABLE_LINES: Final[frozenset[str]] = frozenset({"opus", "sonnet"})
 _ADAPTIVE_ALWAYS_CAPABLE: Final[frozenset[str]] = frozenset({"fable", "mythos"})
 
+# Claude 4.5 and earlier answer `output_config.effort` with
+# 400 "This model does not support the effort parameter." 4.6 accepts the field
+# but ignores it; only 5.x acts on it. The floor is what matters here: accepting
+# and ignoring is harmless, rejecting is not.
+_EFFORT_CONFIG_MIN_VERSION: Final[tuple[int, int]] = (4, 6)
+
 # Bounded to two digits so trailing date stamps ("...-4-6-20250514") are not
 # misread as versions.
 _VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(r"(?<!\d)(\d{1,2})(?:-(\d{1,2}))?(?!\d)")
@@ -51,6 +59,7 @@ class ModelCapabilities:
     supports_adaptive: bool
     requires_adaptive: bool
     accepts_reasoning_controls: bool
+    accepts_effort_config: bool
 
     @property
     def supports_thinking(self) -> bool:
@@ -94,4 +103,5 @@ def capabilities_for(model_id: str) -> ModelCapabilities:
         supports_adaptive=version >= _ADAPTIVE_MIN_VERSION,
         requires_adaptive=version >= _ADAPTIVE_ONLY_MIN_VERSION,
         accepts_reasoning_controls=not _REASONING_INCOMPATIBLE_RE.search(normalized),
+        accepts_effort_config=not is_anthropic or version >= _EFFORT_CONFIG_MIN_VERSION,
     )
