@@ -40,7 +40,7 @@ docker compose exec proxy python /app/playwright_login.py   # force a token refr
 open-webui-openai-compatible/
 ├── CONTEXT.md            # domain glossary — the seams have names, use them
 ├── src/
-│   ├── settings.py       # Pydantic Settings singleton — instantiated at import time (:38)
+│   ├── settings.py       # Pydantic Settings singleton — instantiated at import time (:39)
 │   ├── auth.py           # TOKEN STORE: file/env read, expiry, refresh protocol, atomic write
 │   ├── errors.py         # transport-neutral upstream error classification (38 lines)
 │   ├── main.py           # create_app / build_upstream_clients / UpstreamClients / app
@@ -53,7 +53,7 @@ open-webui-openai-compatible/
 │   └── proxy/
 │       ├── openai/       # GET /v1/models, POST /v1/chat/completions  → see its AGENTS.md
 │       └── anthropic/    # POST /v1/messages                         → see its AGENTS.md
-├── tests/                # 8 unit files + fakes.py + 5 integration      → see its AGENTS.md
+├── tests/                # 9 unit files + fakes.py + 5 integration      → see its AGENTS.md
 ├── playwright_login.py   # Sidecar: headless Chromium → JWT → token file. Owns the refresh lock
 ├── entrypoint.sh         # Container startup: login if needed, refresh loop, exec uvicorn
 ├── tui.py                # Standalone Textual client; talks to the PROXY. No src/ imports
@@ -73,7 +73,7 @@ open-webui-openai-compatible/
 | Task | Location | Notes |
 |------|----------|-------|
 | Domain vocabulary | `CONTEXT.md` | Names the seams; use these terms in code and docs |
-| Gateway request rules (all 7 passes) | `src/open_webui/request_policy.py` | Shared by both frontends |
+| Gateway request rules (all 8 passes) | `src/open_webui/request_policy.py` | Shared by both frontends |
 | Upstream rate-limit stall | `src/open_webui/rate_limit.py` | Detection + per-request stall budget; 429 + `Retry-After` on exhaustion (ADR-0006) |
 | What a model accepts | `src/open_webui/capabilities.py` | `capabilities_for()`; rules are empirical, see ADR-0004 |
 | OpenAI routes / thinking variants | `src/proxy/openai/` | Has its own AGENTS.md |
@@ -91,12 +91,12 @@ open-webui-openai-compatible/
 
 | Module | Role |
 |--------|------|
-| `src/settings.py` | Settings singleton — **instantiated at import time** (`:38`) |
+| `src/settings.py` | Settings singleton — **instantiated at import time** (`:39`) |
 | `src/auth.py` | Token store and refresh protocol. Public: `get_current_token` (`:127`), `should_refresh` (`:160`), `request_refresh` (`:178`), `write_token_file` (`:87`), `get_token_expiry`, `is_token_expired_or_invalid`, `get_token_file_path`, `extract_error_code` |
 | `src/errors.py` | `classify_upstream_error`, `log_upstream_error`. Transport-neutral — imports no frontend |
 | `src/open_webui/rate_limit.py` | `is_rate_limit` (`:48`), `RateLimitStall` (`:82`) — stall budget, ADR-0006 |
-| `src/open_webui/capabilities.py` | `capabilities_for()` (`:88`) → frozen `ModelCapabilities` (`:49`) |
-| `src/open_webui/request_policy.py` | `rewrite_chat_body` (`:208`), `split_body_for_sdk` (`:222`), `prepare_chat_body` (`:234`), `SDK_KNOWN_PARAMS` (`:29`) |
+| `src/open_webui/capabilities.py` | `capabilities_for()` (`:94`) → frozen `ModelCapabilities` (`:56`) |
+| `src/open_webui/request_policy.py` | `rewrite_chat_body` (`:238`), `split_body_for_sdk` (`:254`), `prepare_chat_body` (`:266`), `SDK_KNOWN_PARAMS` (`:29`) |
 | `src/main.py` | `UpstreamClients` (`:44`), `build_upstream_clients` (`:53`), `create_app` (`:71`), `app = create_app()` (`:98`), `_TokenAuth` (`:35`) |
 | `src/proxy/openai/errors.py` | `create_openai_error` — OpenAI wire format only |
 | `src/models.py`, `src/translator.py` | Back-compat re-export shims (`# noqa: F401`). Consumed only by `tests/test_openai_translator.py` |
@@ -109,9 +109,9 @@ open-webui-openai-compatible/
 | Route | Defined at | Upstream |
 |-------|-----------|----------|
 | `GET /health` | `main.py:91` | — |
-| `GET /v1/models` | `proxy/openai/routes.py:153` | `GET /api/models` (injected httpx client) |
-| `POST /v1/chat/completions` | `proxy/openai/routes.py:185` | `POST /api/chat/completions` (openai SDK) |
-| `POST /v1/messages` | `proxy/anthropic/routes.py:76` | `POST /api/chat/completions` (openai SDK) |
+| `GET /v1/models` | `proxy/openai/routes.py:164` | `GET /api/models` (injected httpx client) |
+| `POST /v1/chat/completions` | `proxy/openai/routes.py:196` | `POST /api/chat/completions` (openai SDK) |
+| `POST /v1/messages` | `proxy/anthropic/routes.py:86` | `POST /api/chat/completions` (openai SDK) |
 
 No `/v1/models/{id}`, no embeddings, no CORS middleware. The proxy deliberately avoids Open WebUI's own `/v1/*` paths — those require an `sk-` API key, not a JWT. `AsyncOpenAI.base_url` is `{open_webui_url}/api` so the SDK's `/chat/completions` lands on `/api/chat/completions`.
 
@@ -153,13 +153,13 @@ Spawned sidecars are reaped by a daemon thread (`auth.py` `_reap`) because uvico
 | `BROWSER_PROFILE_DIR` | sidecar, `entrypoint.sh`, compose | `/data/browser-profile` |
 | `REFRESH_INTERVAL_SECONDS` | `entrypoint.sh` only | `7200` |
 | `PLAYWRIGHT_HEADLESS` | `playwright_login.py` | `true` |
-| `PORT` / `REQUEST_TIMEOUT` / `STREAM_EMPTY_RETRY_MAX` / `LOG_LEVEL` | `settings.py:17-20` | `8000` / `300` (10-3600) / `3` (0-10) / `INFO` |
-| `RATE_LIMIT_STALL_MAX_SECONDS` | `settings.py` (optional) | `300` (0–3600; 0 disables stalling) |
+| `PORT` / `REQUEST_TIMEOUT` / `STREAM_EMPTY_RETRY_MAX` / `LOG_LEVEL` | `settings.py:17-21` | `8000` / `300` (10-3600) / `3` (0-10) / `INFO` |
+| `RATE_LIMIT_STALL_MAX_SECONDS` | `settings.py:20` | `300` (0–3600; 0 disables stalling) |
 | `PROXY_URL` | `tui.py` only | `http://localhost:8000` |
 
 ## Critical gotcha: settings singleton
 
-`src/settings.py:38` runs `settings = Settings()` at **module level**:
+`src/settings.py:39` runs `settings = Settings()` at **module level**:
 
 - Importing *any* `src` module triggers validation. Missing `OPEN_WEBUI_URL` crashes the import with `ValidationError`. `USER_TOKEN` is optional, so its absence does not.
 - Tests survive via `os.environ.setdefault()` at the top of `tests/conftest.py`, which runs before any `src` import during collection.
@@ -237,8 +237,8 @@ A client-supplied `thinking` param is stripped for non-Anthropic models (it is A
 - Error responses use each frontend's own format. The backend module must never format a wire-format error, or the coupling it removed comes back.
 - Never put `USER_TOKEN` in a log or error message. Token values are never logged.
 - `max_retries=0` on `AsyncOpenAI` (`main.py`) — the proxy owns retries. Raising it double-fires them.
-- `_SSE_HEADERS` must stay on every `StreamingResponse` or streaming breaks behind nginx/Caddy. It is defined **twice** (`proxy/openai/routes.py:31`, `proxy/anthropic/routes.py:29`), as is `_RETRY_BACKOFF_CAP` (`:36` / `:104`) — keep them in sync.
-- Do not remove these suppressions: `settings.py:38` `[call-arg]`; the `[union-attr]` and `[arg-type]` ignores in both routes files.
+- `_SSE_HEADERS` must stay on every `StreamingResponse` or streaming breaks behind nginx/Caddy. It is defined **twice** (`proxy/openai/routes.py:32`, `proxy/anthropic/routes.py:30`), as is `_RETRY_BACKOFF_CAP` (`:37` / `:114`) — keep them in sync.
+- Do not remove these suppressions: `settings.py:39` `[call-arg]`; the `[union-attr]` and `[arg-type]` ignores in both routes files.
 - Adding an upstream parameter requires adding it to `SDK_KNOWN_PARAMS` (`open_webui/request_policy.py:29`) or it silently routes to `extra_body`.
 - Docker: compose builds `Dockerfile.playwright`. `docker compose down -v` deletes the volume holding the token **and** the browser profile, forcing a full interactive Duo login next start.
 

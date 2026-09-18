@@ -4,13 +4,14 @@
 
 | File | Tests | Asserts | Targets |
 |---|---|---|---|
-| `test_openai_translator.py` | 95 | 159 | `src.translator` / `src.models` shims → `proxy.openai` |
-| `test_anthropic_translator.py` | 54 | 126 | `proxy.anthropic.translator`, incl. `StreamingState` |
-| `test_openai_routes.py` | 36 | 90 | `/v1/models`, `/v1/chat/completions` |
+| `test_openai_translator.py` | 93 | 148 | `src.translator` / `src.models` shims → `proxy.openai` |
+| `test_anthropic_translator.py` | 55 | 129 | `proxy.anthropic.translator`, incl. `StreamingState` |
+| `test_openai_routes.py` | 36 | 88 | `/v1/models`, `/v1/chat/completions` |
 | `test_anthropic_routes.py` | 25 | 75 | `/v1/messages` |
-| `test_capabilities.py` | 25 | 34 | `src.open_webui.capabilities` |
+| `test_capabilities.py` | 29 | 40 | `src.open_webui.capabilities` |
 | `test_auth.py` | 20 | 21 | `src.auth` token store |
 | `test_refresh_trigger.py` | 17 | 25 | 401 → refresh, single-flight, atomic write |
+| `test_rate_limit.py` | 21 | 60 | `src.open_webui.rate_limit` detection/stall budget + both route seams (stall → 429 + `Retry-After`) |
 | `test_playwright_login.py` | 4 | 10 | the sidecar, with a REAL headless Chromium |
 
 Plus `fakes.py` (shared fakes), `conftest.py`, and 5 files in `tests/integration/`.
@@ -72,7 +73,7 @@ Asserting upstream params: a `captured: dict = {}` closure plus `captured.update
 
 ## conftest.py
 
-- Module level sets six env vars via `os.environ.setdefault` BEFORE any `src` import: `OPEN_WEBUI_URL`, `USER_TOKEN`, `PORT`, `REQUEST_TIMEOUT`, `LOG_LEVEL`, `TOKEN_FILE`. `src/settings.py:38` runs `settings = Settings()` at import time, so a missing var crashes collection.
+- Module level sets seven env vars via `os.environ.setdefault` BEFORE any `src` import: `OPEN_WEBUI_URL`, `USER_TOKEN`, `PORT`, `REQUEST_TIMEOUT`, `LOG_LEVEL`, `TOKEN_FILE`, `RATE_LIMIT_STALL_MAX_SECONDS`. `src/settings.py:39` runs `settings = Settings()` at import time, so a missing var crashes collection.
 - `TOKEN_FILE` is `/nonexistent/open-webui-proxy-test/token.json` — an impossible path, so `get_current_token()` falls back to `USER_TOKEN` instead of reading the developer's real token.
 - The autouse `mock_settings` fixture uses `monkeypatch.setenv` (hard override per test); module level uses `setdefault` (fills gaps only). Different layers, different semantics.
 - `TEST_DEFAULT_URL` / `TEST_DEFAULT_TOKEN` are a CONTRACT: `integration/conftest.py::_is_real_instance()` compares the imported settings singleton against them. Integration env vars must therefore be **exported before pytest starts** — `.env` or mid-session changes do not work.
@@ -109,6 +110,7 @@ All five set `pytestmark = [skip_without_real_instance, pytest.mark.flaky(reruns
 | `/v1/messages` behaviour, suffix stripping, 401 refresh | `test_anthropic_routes.py` |
 | Token file/env fallback, expiry | `test_auth.py` |
 | 401 → refresh, lock ownership, atomic write, reaping | `test_refresh_trigger.py` |
+| Rate-limit detection, stall budget, 429 exhaustion | `test_rate_limit.py` |
 | Sidecar browser login (needs a browser) | `test_playwright_login.py` |
 | Real-instance behaviour | `tests/integration/` |
 
