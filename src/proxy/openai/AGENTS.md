@@ -1,6 +1,6 @@
 # src/proxy/openai/
 
-The OpenAI-compatible **frontend**: `GET /v1/models` (routes.py:164) and `POST /v1/chat/completions` (routes.py:196). It owns OpenAI wire format only — request shapes, SSE framing, error bodies, and the thinking-variant surface. **Gateway policy lives in `src/open_webui/`, not here.**
+The OpenAI-compatible **frontend**: `GET /v1/models` (routes.py:170) and `POST /v1/chat/completions` (routes.py:202). It owns OpenAI wire format only — request shapes, SSE framing, error bodies, and the thinking-variant surface. **Gateway policy lives in `src/open_webui/`, not here.**
 
 Vocabulary: [`CONTEXT.md`](../../../CONTEXT.md).
 
@@ -32,12 +32,12 @@ Backend policy moved out. Nothing here re-derives a model family, and no private
 
 ## routes.py
 
-- `_SSE_HEADERS` (`:32`: `Cache-Control: no-cache`, `X-Accel-Buffering: no`) — required on every `StreamingResponse` or SSE breaks behind nginx/Caddy. Duplicated at `../anthropic/routes.py:30`; keep in sync.
-- `_RETRY_BACKOFF_CAP` (`:37`, 120s). Duplicated at `../anthropic/routes.py:114`.
-- `_upstream_error_response` (`:46`) and `_token_expired_error_response` (`:53`) build OpenAI-format bodies via `errors.create_openai_error`.
-- `_refresh_for` (`:73`) is the only token helper left in this file: on a 401 it asks `auth.should_refresh(get_current_token(), exc.body)` and calls `auth.request_refresh()`. Positive evidence only — a bare 401 is not enough. Call sites: streaming create (`:248`), streaming first-chunk (`:269`), non-streaming (`:358`); the models route inlines the same check at `:176`. Each path returns **503**; the client retries, the proxy never retries a 401 itself.
-- Streaming retry (`_handle_streaming` `:231`): total attempts `1 + settings.stream_empty_retry_max`, backoff `min(1 << attempt, _RETRY_BACKOFF_CAP)`. 4xx short-circuits and is never retried — except the rate-limit class of 400, which stalls within `RateLimitStall(settings.rate_limit_stall_max_seconds)` (created at `:238` for streaming, `:350` for non-streaming) and answers 429 + `Retry-After` via `_rate_limit_exhausted_response` (`:61`) on budget exhaustion. The first chunk is pre-read via `__anext__` before `StreamingResponse` returns, so an immediate rejection surfaces as an HTTP error rather than a broken stream. Exhausted `StopAsyncIteration` yields a synthetic `finish_reason="stop"` chunk. Rationale: [ADR-0003](../../../docs/adr/0003-streaming-retry-and-commit-semantics.md).
-- `models` (`:165`) reads the injected client directly: `request.app.state.models_client.get("/api/models")` (`:168`) then `raise_for_status()`. There is no `WebClient` wrapper any more, and no `app.state.web_client`.
+- `_SSE_HEADERS` (`:37`: `Cache-Control: no-cache`, `X-Accel-Buffering: no`) — required on every `StreamingResponse` or SSE breaks behind nginx/Caddy. Duplicated at `../anthropic/routes.py:35`; keep in sync.
+- `_RETRY_BACKOFF_CAP` (`:42`, 120s). Duplicated at `../anthropic/routes.py:119`.
+- `_upstream_error_response` (`:51`) and `_token_expired_error_response` (`:58`) build OpenAI-format bodies via `errors.create_openai_error`.
+- `_refresh_for` (`:78`) is the only token helper left in this file: on a 401 it asks `auth.should_refresh(get_current_token(), exc.body)` and calls `auth.request_refresh()`. Positive evidence only — a bare 401 is not enough. Call sites: streaming create (`:256`), streaming first-chunk (`:279`), non-streaming (`:372`); the models route inlines the same check at `:186`. Each path returns **503**; the client retries, the proxy never retries a 401 itself.
+- Streaming retry (`_handle_streaming` `:236`): total attempts `1 + settings.stream_empty_retry_max`, backoff `min(1 << attempt, _RETRY_BACKOFF_CAP)`. 4xx short-circuits and is never retried — except the rate-limit class of 400, which stalls within `RateLimitStall(settings.rate_limit_stall_max_seconds)` (created at `:243` for streaming, `:361` for non-streaming) and answers 429 + `Retry-After` via `_rate_limit_exhausted_response` (`:66`) on budget exhaustion. The first chunk is pre-read via `__anext__` before `StreamingResponse` is returned, so an immediate rejection surfaces as an HTTP error rather than a broken stream; a rate-limited first chunk drops its recorded admission before stalling (ADR-0007). Exhausted `StopAsyncIteration` yields a synthetic `finish_reason="stop"` chunk. Rationale: [ADR-0003](../../../docs/adr/0003-streaming-retry-and-commit-semantics.md).
+- `models` (`:170`) reads the injected client directly: `request.app.state.models_client.get("/api/models")` (`:173`) then `raise_for_status()`. There is no `WebClient` wrapper any more, and no `app.state.web_client`.
 - `# type: ignore[union-attr]` and `# type: ignore[arg-type]` in the streaming path are flow-guaranteed non-None. Do not remove.
 
 ## translator.py
@@ -58,7 +58,7 @@ All family questions go through `capabilities_for()`. This module contains no re
 
 ## Cross-package contract
 
-The Anthropic frontend imports two **public** symbols from this package: `resolve_thinking_model` and `apply_thinking_params` (`../anthropic/routes.py:20`). Changing either signature breaks that route. It imports nothing private.
+The Anthropic frontend imports two **public** symbols from this package: `resolve_thinking_model` and `apply_thinking_params` (`../anthropic/routes.py:25`). Changing either signature breaks that route. It imports nothing private.
 
 ## Constraints
 

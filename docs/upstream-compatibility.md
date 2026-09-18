@@ -137,7 +137,9 @@ if it starts working, delete this section.
 The gateway enforces **two** request tiers per end user, and overage is
 reported as HTTP **400**, not 429:
 
-- 20 requests per 60 s for the end user, with a reset timestamp:
+- 20 requests per 60 s for the end user, with a reset timestamp — the
+  detail carries the exact reset time, so the proxy needs no window model
+  for this tier:
 
 ```
 {"detail":"Rate limit exceeded for end_user: josephmarbella@arizona.edu.
@@ -145,25 +147,42 @@ Limit type: requests. Current limit: 20, Remaining: 0. Limit resets at:
 2026-09-18 15:54:15 UTC"}
 ```
 
-- A tighter per-model tier (10 requests per minute) whose detail carries **no
-reset timestamp**:
+- A burst tier of 10 requests per 60 s, whose detail carries **no reset
+  timestamp** — only the limit and unit. The window boundary is not
+  advertised; the proxy models it as a rolling 60 s window (ADR-0007):
 
 ```
 {"detail":"Rate limit exceeded: 10 requests per minute. Please wait before
 trying again."}
 ```
 
+The sliding tier is per end user, **not per model** (the earlier "per-model"
+text was wrong). Probes, 2026-09-18:
+
+- A burst on one model exhausts the budget for every other model.
+- `POST /api/chat/completions` and `POST /api/v1/chat/completions` share the
+  same budget.
+- Varying the `user` field in the request body (two alternate values)
+  changed nothing — the limit keys off the authenticated end user.
+- `GET /api/models` consumes no slot.
+- A rejected request consumes no slot.
+
+The sustainable rate is exactly 10/min: after a full burst of 10, no
+request is admitted until the window frees.
 No `Retry-After` and no `RateLimit-*` headers on either tier; where present,
 the window-reset time exists only inside the detail string. A rejected request
-does not consume a slot, and the windows reliably reopen at the advertised
-reset.
+does not consume a slot, and the end-user window reliably reopens at its
+advertised reset.
 
 **Workaround:** `is_rate_limit` / `RateLimitStall`
 (`src/open_webui/rate_limit.py`) treat this body — and any 429 — as a rate
-limit, stall pre-header requests until the advertised reset (budget
-`RATE_LIMIT_STALL_MAX_SECONDS`, default 300 s), and surface a 429 with
-`Retry-After` on exhaustion. See [ADR-0006](adr/0006-rate-limit-stall.md).
-
+limit and stall pre-header requests (budget `RATE_LIMIT_STALL_MAX_SECONDS`,
+default 300 s). The end-user tier stalls until the advertised reset; the
+sliding tier stalls to the exact next free slot computed by
+`SlidingWindowTracker` from this process's own admissions. On exhaustion the
+proxy surfaces a 429 with `Retry-After` — for the sliding tier, the seconds
+until the next slot. See [ADR-0006](adr/0006-rate-limit-stall.md) and
+[ADR-0007](adr/0007-slot-aware-stall.md).
 **Removal trigger:** the gateway starts emitting a 429 with `Retry-After`
 (or `RateLimit-*` headers). Then drop the 400+detail sniff and keep the 429
 path.

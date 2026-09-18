@@ -16,7 +16,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ...auth import get_current_token, request_refresh, should_refresh
 from ...errors import classify_upstream_error, log_upstream_error
-from ...open_webui.rate_limit import RateLimitStall
+from ...open_webui.rate_limit import (
+    RateLimitStall,
+    is_rate_limit,
+    record_upstream_admission,
+    record_upstream_rejection,
+)
 from ...open_webui.request_policy import split_body_for_sdk
 from ...settings import settings
 from .errors import create_openai_error
@@ -239,12 +244,15 @@ async def _handle_streaming(
     attempt = 0
 
     while True:
+        admitted_at = record_upstream_admission()
         try:
             stream = await ai_client.chat.completions.create(
                 **sdk_kwargs,
                 extra_body=extra or None,
             )
         except openai.APIStatusError as exc:
+            if is_rate_limit(exc):
+                record_upstream_rejection(admitted_at)
             if exc.status_code == 401 and _refresh_for(exc):
                 return _token_expired_error_response()
             sleep = stall.sleep_for(exc)
@@ -266,6 +274,8 @@ async def _handle_streaming(
         try:
             first_chunk = await stream.__anext__()  # type: ignore[union-attr]
         except openai.APIStatusError as exc:
+            if is_rate_limit(exc):
+                record_upstream_rejection(admitted_at)
             if exc.status_code == 401 and _refresh_for(exc):
                 return _token_expired_error_response()
             sleep = stall.sleep_for(exc)
@@ -294,6 +304,7 @@ async def _handle_streaming(
             if isinstance(exc, openai.APIStatusError):
                 sleep = stall.sleep_for(exc)
                 if sleep is not None:
+                    record_upstream_rejection(admitted_at)
                     logger.warning(
                         "Streaming first chunk: upstream rate limited — stalling %.1f s (budget %d s)",
                         sleep, settings.rate_limit_stall_max_seconds,
@@ -349,12 +360,15 @@ async def _handle_non_streaming(
     """Handle a non-streaming chat completion request."""
     stall = RateLimitStall(settings.rate_limit_stall_max_seconds)
     while True:
+        admitted_at = record_upstream_admission()
         try:
             result = await ai_client.chat.completions.create(
                 **sdk_kwargs,
                 extra_body=extra or None,
             )
         except openai.APIStatusError as exc:
+            if is_rate_limit(exc):
+                record_upstream_rejection(admitted_at)
             if exc.status_code == 401 and _refresh_for(exc):
                 return _token_expired_error_response()
             sleep = stall.sleep_for(exc)

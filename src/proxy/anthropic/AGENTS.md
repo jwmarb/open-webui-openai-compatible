@@ -1,31 +1,31 @@
 # src/proxy/anthropic/
 
-The Anthropic Messages API **frontend**: `POST /v1/messages` (routes.py:86). Translates Anthropic requests into a **canonical body**, sends them upstream via the OpenAI SDK, and translates responses back. Design rationale: [ADR-0001](../../../docs/adr/0001-anthropic-api-frontend-via-translation.md).
+The Anthropic Messages API **frontend**: `POST /v1/messages` (routes.py:92). Translates Anthropic requests into a **canonical body**, sends them upstream via the OpenAI SDK, and translates responses back. Design rationale: [ADR-0001](../../../docs/adr/0001-anthropic-api-frontend-via-translation.md).
 
 Vocabulary: [`CONTEXT.md`](../../../CONTEXT.md).
 
 ## Route flow
 
-`routes.py:86-109`, in this order — the order is load-bearing:
+`routes.py:91-115`, in this order — the order is load-bearing:
 
 1. `translate_request(raw_body)` → canonical (OpenAI-shaped) body.
 2. `resolve_thinking_model()` + `apply_thinking_params()` — strips `:adaptive` and injects the thinking config. **Without this the suffix reached upstream as a literal model ID and 404'd.** `:extended` is no longer recognised anywhere.
 3. `prepare_chat_body()` → the eight **rewrite passes** plus the SDK/`extra_body` split, in one call.
-4. `_handle_streaming` (`:117`) or `_handle_non_streaming` (`:220`).
+4. `_handle_streaming` (`:122`) or `_handle_non_streaming` (`:230`).
 
 ## Cross-package imports — all public
 
-- `routes.py:20` — `resolve_thinking_model`, `apply_thinking_params` from `../openai/translator.py`.
-- `routes.py:18` — `prepare_chat_body` from `../../open_webui/request_policy.py`.
-- `routes.py:15-16` — `classify_upstream_error`, `log_upstream_error` from `src/errors.py`; `get_current_token`, `request_refresh`, `should_refresh` from `src/auth.py`.
+- `routes.py:25` — `resolve_thinking_model`, `apply_thinking_params` from `../openai/translator.py`.
+- `routes.py:23` — `prepare_chat_body` from `../../open_webui/request_policy.py`.
+- `routes.py:14-15` — `classify_upstream_error`, `log_upstream_error` from `src/errors.py`; `get_current_token`, `request_refresh`, `should_refresh` from `src/auth.py`.
 
 No private symbol crosses a package seam. The former `from ..openai.routes import _split_body_for_sdk` is gone.
 
-Still duplicated with `../openai/routes.py`, keep in sync: `_SSE_HEADERS` (`:30` ↔ `:32`), `_RETRY_BACKOFF_CAP` (`:114` ↔ `:37`).
+Still duplicated with `../openai/routes.py`, keep in sync: `_SSE_HEADERS` (`:35` ↔ `:37`), `_RETRY_BACKOFF_CAP` (`:119` ↔ `:42`).
 
 ## 401 handling — now symmetric with the OpenAI route
 
-`_refresh_for` (`:38`) returns True when the exception is a 401 **and** `should_refresh(get_current_token(), exc.body)` finds positive token-fault evidence; it then calls `request_refresh()`. `_token_expired_error_response` (`:48`) returns **503** in Anthropic error format. Three call sites: streaming create (`:134`), streaming first-chunk (`:152`), non-streaming (`:234`).
+`_refresh_for` (`:43`) returns True when the exception is a 401 **and** `should_refresh(get_current_token(), exc.body)` finds positive token-fault evidence; it then calls `request_refresh()`. `_token_expired_error_response` (`:53`) returns **503** in Anthropic error format. Three call sites: streaming create (`:142`), streaming first-chunk (`:162`), non-streaming (`:247`).
 
 A 401 without token evidence (e.g. `model_access_denied`) still passes through as a 401. The earlier asymmetry — where an Anthropic-only client never triggered a refresh — is fixed.
 
@@ -57,7 +57,7 @@ Invariants, each pinned by a test:
 
 **Parallel tool calls are buffered, not streamed through.** Upstream interleaves tool-call fragments by `index`; Anthropic requires sequential, non-overlapping blocks (its SDK appends on `content_block_start` and indexes `content[event.index]` on delta, so an interleaved stream raises). `_buffer_tool_calls` (`:484`) accumulates id/name/arguments per upstream index; `_flush_tool_blocks` (`:383`) emits each as a complete start→delta→stop block at `finalize()`. This trades a little latency on tool calls for wire correctness.
 
-All events are plain dicts; `routes.py` serializes them via `_sse_event` (`:82`).
+All events are plain dicts; `routes.py` serializes them via `_sse_event` (`:87`).
 
 ## models.py
 
@@ -72,8 +72,8 @@ The 6 SSE event classes, `AnthropicRequest`, and every request-side content-bloc
 | Change SSE event shape or ordering | `StreamingState` (`translator.py:317`). NOT models.py |
 | Add an Anthropic request parameter | `translator.py` `translate_request`. If the key is not in `SDK_KNOWN_PARAMS` (`../../open_webui/request_policy.py:29`) it routes to `extra_body` |
 | Add a content block type | Request side: `_translate_content_blocks` (`translator.py:73`). Response side: `translate_response` (`:261`) |
-| Change error shape | `create_anthropic_error` (`translator.py:24`) + `_anthropic_error_response` (`routes.py:67`) |
-| Streaming lifecycle | `StreamingState` + `_handle_streaming` (`routes.py:117`) |
+| Change error shape | `create_anthropic_error` (`translator.py:24`) + `_anthropic_error_response` (`routes.py:72`) |
+| Streaming lifecycle | `StreamingState` + `_handle_streaming` (`routes.py:122`) |
 
 ## Constraints / gotchas
 

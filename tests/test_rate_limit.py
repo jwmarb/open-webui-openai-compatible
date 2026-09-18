@@ -12,18 +12,33 @@ import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 from openai.types.chat import ChatCompletion
 from openai.types.chat.chat_completion import ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice as CompletionChoice
 
 from src.main import create_app
-from src.open_webui.rate_limit import RateLimitStall, is_rate_limit, seconds_until_reset
+from src.open_webui.rate_limit import (
+    RateLimitStall,
+    SlidingWindowTracker,
+    is_rate_limit,
+    rpm_tier_from_detail,
+    seconds_until_reset,
+)
 from tests.fakes import chunk, completion, fake_clients, parse_sse_events, status_error
 
 OPENAI_SETTINGS = "src.proxy.openai.routes.settings"
 ANTHROPIC_SETTINGS = "src.proxy.anthropic.routes.settings"
 
+@pytest.fixture(autouse=True)
+def _fresh_tracker():
+    """The sliding-window tracker is a process singleton; reset it per test."""
+    from src.open_webui import rate_limit as rate_limit_module
+
+    rate_limit_module._tracker.reset()
+    yield
+    rate_limit_module._tracker.reset()
 
 def _detail(reset_in_seconds: float) -> str:
     reset_at = datetime.now(UTC) + timedelta(seconds=reset_in_seconds)
@@ -171,6 +186,172 @@ class TestStallBudget:
         assert stall2.retry_after() == 1
 
 
+def _rpm_tier_400() -> Exception:
+    """The sliding-tier detail as emitted by genai.arizona.edu (verified 2026-09-18)."""
+    return status_error(
+        400,
+        "rate limited",
+        body={"detail": "Rate limit exceeded: 10 requests per minute. Please wait before trying again."},
+    )
+
+
+class TestRpmTierParsing:
+    def test_live_gateway_detail(self):
+        detail = "Rate limit exceeded: 10 requests per minute. Please wait before trying again."
+        assert rpm_tier_from_detail(detail) == (10, 60.0)
+
+    def test_other_units(self):
+        assert rpm_tier_from_detail("Rate limit exceeded: 5 requests per second.") == (5, 1.0)
+        assert rpm_tier_from_detail("Rate limit exceeded: 600 requests per hour.") == (600, 3600.0)
+
+    def test_end_user_detail_does_not_match(self):
+        assert rpm_tier_from_detail(_detail(5.0)) is None
+
+    def test_arbitrary_detail_does_not_match(self):
+        assert rpm_tier_from_detail("unknown_parameter: 'thinking'") is None
+
+
+class TestSlidingWindowTracker:
+    def test_empty_tracker_has_a_free_slot(self):
+        tracker = SlidingWindowTracker()
+        assert not tracker.has_history
+        assert tracker.seconds_until_next_slot() == 0.0
+
+    def test_full_window_reports_the_wait(self):
+        tracker = SlidingWindowTracker()
+        tracker.observe(10, 60)
+        for _ in range(10):
+            tracker.mark_admitted()
+        assert 59.0 < tracker.seconds_until_next_slot() <= 60.0
+
+    def test_rejection_frees_the_slot(self):
+        tracker = SlidingWindowTracker()
+        tracker.observe(2, 60)
+        stamp = tracker.mark_admitted()
+        tracker.mark_admitted()
+        assert tracker.seconds_until_next_slot() > 0
+        tracker.mark_rejected(stamp)
+        assert tracker.seconds_until_next_slot() == 0.0
+
+    def test_window_expiry_frees_the_slot(self):
+        tracker = SlidingWindowTracker()
+        tracker.observe(2, 0.3)
+        tracker.mark_admitted()
+        tracker.mark_admitted()
+        assert tracker.seconds_until_next_slot() > 0
+        time.sleep(0.35)
+        assert tracker.seconds_until_next_slot() == 0.0
+
+    def test_observe_widens_the_limit(self):
+        tracker = SlidingWindowTracker()
+        tracker.observe(2, 60)
+        tracker.mark_admitted()
+        tracker.mark_admitted()
+        assert tracker.seconds_until_next_slot() > 0
+        tracker.observe(3, 60)
+        assert tracker.seconds_until_next_slot() == 0.0
+
+    def test_reset_restores_defaults(self):
+        tracker = SlidingWindowTracker()
+        tracker.observe(2, 0.3)
+        tracker.mark_admitted()
+        tracker.reset()
+        assert not tracker.has_history
+        assert tracker.seconds_until_next_slot() == 0.0
+
+
+class TestSlotAwareStall:
+    def test_sleeps_until_the_next_slot(self):
+        from src.open_webui import rate_limit as rate_limit_module
+
+        rate_limit_module._tracker.observe(10, 60)
+        for _ in range(10):
+            rate_limit_module._tracker.mark_admitted()
+        stall = RateLimitStall(300)
+        sleep = stall.sleep_for(_rpm_tier_400())
+        assert sleep is not None
+        assert 58.0 < sleep <= 60.0
+
+    def test_free_slot_retries_immediately(self):
+        from src.open_webui import rate_limit as rate_limit_module
+
+        rate_limit_module._tracker.observe(10, 60)
+        for _ in range(5):
+            rate_limit_module._tracker.mark_admitted()
+        stall = RateLimitStall(300)
+        sleep = stall.sleep_for(_rpm_tier_400())
+        assert sleep is not None
+        assert sleep < 0.2
+
+    def test_empty_tracker_falls_back_to_one_second(self):
+        stall = RateLimitStall(5.0)
+        assert stall.sleep_for(_rpm_tier_400()) == 1.0
+
+    def test_sleep_never_exceeds_the_budget(self):
+        from src.open_webui import rate_limit as rate_limit_module
+
+        rate_limit_module._tracker.observe(10, 60)
+        for _ in range(10):
+            rate_limit_module._tracker.mark_admitted()
+        stall = RateLimitStall(0.5)
+        sleep = stall.sleep_for(_rpm_tier_400())
+        assert sleep is not None
+        assert sleep <= 0.5
+
+    def test_retry_after_uses_the_next_slot(self):
+        from src.open_webui import rate_limit as rate_limit_module
+
+        rate_limit_module._tracker.observe(10, 60)
+        for _ in range(10):
+            rate_limit_module._tracker.mark_admitted()
+        stall = RateLimitStall(300)
+        stall.sleep_for(_rpm_tier_400())
+        assert 58 <= stall.retry_after() <= 61
+
+
+class TestAdmissionRecording:
+    def test_successful_request_records_an_admission(self):
+        from src.open_webui import rate_limit as rate_limit_module
+
+        async def handler(**kwargs):
+            return completion(content="ok")
+
+        with _App(handler) as app, patch(OPENAI_SETTINGS) as mock_settings:
+            mock_settings.rate_limit_stall_max_seconds = 300
+            mock_settings.stream_empty_retry_max = 0
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
+                )
+
+        assert response.status_code == 200
+        assert rate_limit_module._tracker.has_history
+        assert rate_limit_module._tracker.seconds_until_next_slot() == 0.0
+
+    def test_rate_limited_request_records_no_admission(self):
+        from src.open_webui import rate_limit as rate_limit_module
+
+        calls = {"n": 0}
+
+        async def handler(**kwargs):
+            calls["n"] += 1
+            raise _rpm_tier_400()
+
+        with _App(handler) as app, patch(OPENAI_SETTINGS) as mock_settings:
+            mock_settings.rate_limit_stall_max_seconds = 0.2
+            mock_settings.stream_empty_retry_max = 0
+            with TestClient(app) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
+                )
+
+        assert response.status_code == 429
+        assert calls["n"] >= 2
+        assert not rate_limit_module._tracker.has_history
+
+
 class TestOpenAISeams:
     def test_non_streaming_recovers(self):
         calls = {"n": 0}
@@ -223,6 +404,12 @@ class TestOpenAISeams:
     def test_streaming_first_chunk_recovers(self):
         calls = {"n": 0}
 
+        from src.open_webui import rate_limit as rate_limit_module
+
+        # Narrow the window so a leaked first-chunk admission (2 of 2) would
+        # fill it and make the final slot check below fail.
+        rate_limit_module._tracker.observe(2, 60)
+
         async def handler(**kwargs):
             calls["n"] += 1
             if calls["n"] == 1:
@@ -250,6 +437,11 @@ class TestOpenAISeams:
         assert response.status_code == 200
         assert [c for c in _openai_content_lines(response.text) if c] == ["ok"]
         assert calls["n"] == 2
+        # The rate-limited first chunk must have dropped its admission: only
+        # the successful second attempt's admission remains, so the slot is
+        # free even with the window narrowed to limit 2.
+        assert rate_limit_module._tracker.has_history
+        assert rate_limit_module._tracker.seconds_until_next_slot() == 0.0
 
     def test_streaming_create_exhausts_to_429(self):
         calls = {"n": 0}
@@ -343,6 +535,12 @@ class TestAnthropicSeams:
     def test_streaming_first_chunk_recovers(self):
         calls = {"n": 0}
 
+        from src.open_webui import rate_limit as rate_limit_module
+
+        # Narrow the window so a leaked first-chunk admission (2 of 2) would
+        # fill it and make the final slot check below fail.
+        rate_limit_module._tracker.observe(2, 60)
+
         async def handler(**kwargs):
             calls["n"] += 1
             if calls["n"] == 1:
@@ -380,6 +578,11 @@ class TestAnthropicSeams:
         )
         assert text == "ok"
         assert calls["n"] == 2
+        # The rate-limited first chunk must have dropped its admission: only
+        # the successful second attempt's admission remains, so the slot is
+        # free even with the window narrowed to limit 2.
+        assert rate_limit_module._tracker.has_history
+        assert rate_limit_module._tracker.seconds_until_next_slot() == 0.0
 
     def test_streaming_create_exhausts_to_429(self):
         calls = {"n": 0}

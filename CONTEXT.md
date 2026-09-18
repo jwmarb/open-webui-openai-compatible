@@ -61,10 +61,12 @@ duration of a renewal.
 **Refresh eligibility** — whether an upstream 401 carries positive evidence the
 token is at fault. A bare 401 is not evidence.
 
-**Rate limit** — the gateway's per-end-user request budget (Open WebUI user
-rate limiting). Reported as HTTP 400 with a "Rate limit exceeded" detail that
-carries the exact window-reset time — not as 429. Verified at genai.arizona.edu
-2026-09-18: 20 requests per 60 s.
+**Rate limit** — the gateway's per-end-user request budgets (Open WebUI user
+rate limiting), reported as HTTP 400 with a "Rate limit exceeded" detail —
+not as 429. Verified at genai.arizona.edu 2026-09-18: a binding tier of 10
+requests per rolling 60 s (global across models; detail carries no reset
+time), plus a 20-per-60 s tier whose detail carries the exact window-reset
+time.
 
 **Stall** — holding a client request open, before any response byte is sent,
 while the proxy retries upstream until the rate-limit window resets. A stall is

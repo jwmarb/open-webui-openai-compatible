@@ -11,7 +11,7 @@
 | `test_capabilities.py` | 29 | 40 | `src.open_webui.capabilities` |
 | `test_auth.py` | 20 | 21 | `src.auth` token store |
 | `test_refresh_trigger.py` | 17 | 25 | 401 → refresh, single-flight, atomic write |
-| `test_rate_limit.py` | 21 | 60 | `src.open_webui.rate_limit` detection/stall budget + both route seams (stall → 429 + `Retry-After`) |
+| `test_rate_limit.py` | 38 | 94 | `src.open_webui.rate_limit` detection/stall budget + both route seams (stall → 429 + `Retry-After`) |
 | `test_playwright_login.py` | 4 | 10 | the sidecar, with a REAL headless Chromium |
 
 Plus `fakes.py` (shared fakes), `conftest.py`, and 5 files in `tests/integration/`.
