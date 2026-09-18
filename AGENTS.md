@@ -48,6 +48,7 @@ open-webui-openai-compatible/
 │   ├── translator.py     # Back-compat re-export → src.proxy.openai.translator
 │   ├── open_webui/       # BACKEND POLICY, shared by both frontends
 │   │   ├── capabilities.py    # capabilities_for() — one capability lookup
+│   │   ├── rate_limit.py      # is_rate_limit / RateLimitStall — stall budget (ADR-0006)
 │   │   └── request_policy.py  # 8 rewrite passes, SDK split
 │   └── proxy/
 │       ├── openai/       # GET /v1/models, POST /v1/chat/completions  → see its AGENTS.md
@@ -60,6 +61,7 @@ open-webui-openai-compatible/
 ├── Dockerfile.playwright # What compose builds (Chromium + entrypoint.sh)
 ├── docs/adr/             # 0001 frontend split · 0002 token renewal · 0003 streaming retry
 │                         # 0004 capability inference · 0005 ephemeral conversations
+│                         # 0006 rate-limit stall
 ├── docs/upstream-compatibility.md   # dated gateway-defect workarounds + removal triggers
 └── .github/workflows/ci.yml
 ```
@@ -72,6 +74,7 @@ open-webui-openai-compatible/
 |------|----------|-------|
 | Domain vocabulary | `CONTEXT.md` | Names the seams; use these terms in code and docs |
 | Gateway request rules (all 7 passes) | `src/open_webui/request_policy.py` | Shared by both frontends |
+| Upstream rate-limit stall | `src/open_webui/rate_limit.py` | Detection + per-request stall budget; 429 + `Retry-After` on exhaustion (ADR-0006) |
 | What a model accepts | `src/open_webui/capabilities.py` | `capabilities_for()`; rules are empirical, see ADR-0004 |
 | OpenAI routes / thinking variants | `src/proxy/openai/` | Has its own AGENTS.md |
 | Anthropic route / streaming translation | `src/proxy/anthropic/` | Has its own AGENTS.md |
@@ -91,6 +94,7 @@ open-webui-openai-compatible/
 | `src/settings.py` | Settings singleton — **instantiated at import time** (`:38`) |
 | `src/auth.py` | Token store and refresh protocol. Public: `get_current_token` (`:127`), `should_refresh` (`:160`), `request_refresh` (`:178`), `write_token_file` (`:87`), `get_token_expiry`, `is_token_expired_or_invalid`, `get_token_file_path`, `extract_error_code` |
 | `src/errors.py` | `classify_upstream_error`, `log_upstream_error`. Transport-neutral — imports no frontend |
+| `src/open_webui/rate_limit.py` | `is_rate_limit` (`:48`), `RateLimitStall` (`:82`) — stall budget, ADR-0006 |
 | `src/open_webui/capabilities.py` | `capabilities_for()` (`:88`) → frozen `ModelCapabilities` (`:49`) |
 | `src/open_webui/request_policy.py` | `rewrite_chat_body` (`:208`), `split_body_for_sdk` (`:222`), `prepare_chat_body` (`:234`), `SDK_KNOWN_PARAMS` (`:29`) |
 | `src/main.py` | `UpstreamClients` (`:44`), `build_upstream_clients` (`:53`), `create_app` (`:71`), `app = create_app()` (`:98`), `_TokenAuth` (`:35`) |
@@ -150,6 +154,7 @@ Spawned sidecars are reaped by a daemon thread (`auth.py` `_reap`) because uvico
 | `REFRESH_INTERVAL_SECONDS` | `entrypoint.sh` only | `7200` |
 | `PLAYWRIGHT_HEADLESS` | `playwright_login.py` | `true` |
 | `PORT` / `REQUEST_TIMEOUT` / `STREAM_EMPTY_RETRY_MAX` / `LOG_LEVEL` | `settings.py:17-20` | `8000` / `300` (10-3600) / `3` (0-10) / `INFO` |
+| `RATE_LIMIT_STALL_MAX_SECONDS` | `settings.py` (optional) | `300` (0–3600; 0 disables stalling) |
 | `PROXY_URL` | `tui.py` only | `http://localhost:8000` |
 
 ## Critical gotcha: settings singleton
@@ -183,7 +188,7 @@ Chunks arrive as parsed `ChatCompletionChunk` objects. The OpenAI route re-seria
 
 **First-chunk pre-read**: `__anext__()` is called before `StreamingResponse` is returned, so an immediate upstream rejection becomes a proper HTTP error instead of a broken stream.
 
-**Empty-stream retry**: total attempts = `1 + settings.stream_empty_retry_max`, backoff `min(1 << attempt, 120)`. **4xx is never retried.** On exhaustion via `StopAsyncIteration` a synthetic successful stream is returned.
+**Empty-stream retry**: total attempts = `1 + settings.stream_empty_retry_max`, backoff `min(1 << attempt, 120)`. **4xx is never retried** — with one documented exception: the rate-limit class of 400 stalls within `RATE_LIMIT_STALL_MAX_SECONDS` and then answers 429 + `Retry-After` (ADR-0006). On exhaustion via `StopAsyncIteration` a synthetic successful stream is returned.
 
 **Finish-reason guard** (OpenAI route): if no chunk carried a non-null `finish_reason`, one is synthesized so clients don't hang.
 

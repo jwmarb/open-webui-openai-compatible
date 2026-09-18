@@ -72,6 +72,40 @@ Two separate rules, both empirical:
 **Removal trigger:** when `output_config: {effort}` returns 200 on
 `bedrock-claude-4-5-haiku`, delete `_EFFORT_CONFIG_MIN_VERSION` and the pass.
 
+## `:adaptive` produces zero reasoning on Claude 5.x
+
+**Verified 2026-09-17 against genai.arizona.edu.**
+
+| Request shape | claude-4-6-opus | claude-5-opus | claude-5-sonnet |
+| --- | --- | --- | --- |
+| `thinking: {type: adaptive}` | 200, `reasoning_tokens`=518, thinking text present | 200, `reasoning_tokens`=0, empty text | n/a |
+| adaptive + `output_config.effort: high/max` | n/a | 200, `reasoning_tokens`=0, empty text | 200, `reasoning_tokens`=0, empty text |
+| `thinking: {type: enabled, budget_tokens}` | 200, `reasoning_tokens`=104, thinking text present | 400 "Use adaptive and output_config.effort" | n/a |
+
+The gateway **accepts** `thinking.type=adaptive` on the 5.x line (no error) but no
+reasoning happens: `usage.completion_tokens_details.reasoning_tokens` stays 0 and
+`reasoning_content` is empty, even with `output_config.effort: "max"` on problems
+that force extended work. The same request succeeds with real reasoning on 4.6.
+This is a LiteLLM/Bedrock upstream defect, not a translation bug: the proxy's
+injected body is exactly what was sent, and 4.6 proves the wiring works.
+
+Two signal pitfalls found while verifying:
+
+- `thinking_blocks` appears in **every** response — including requests with no
+  `thinking` param at all — carrying a signature and an empty `thinking` string.
+  Its presence is NOT evidence of thinking.
+- The reliable signals are `usage.completion_tokens_details.reasoning_tokens`
+  and `reasoning_content`.
+
+**Workaround:** none in this repo. The `:adaptive` virtual variant on 5.x models
+silently delivers non-thinking answers; clients wanting guaranteed reasoning on
+this gateway should use `bedrock-claude-4-6-opus` (adaptive works) — the
+`requires_adaptive` gate does not change, so 5.x requests stay legal, they just
+run without reasoning.
+
+**Removal trigger:** re-run the table. When adaptive on a 5.x model returns
+`reasoning_tokens > 0`, delete this section.
+
 ## Structured output is broken upstream for Claude
 
 **Verified 2026-09-06 against genai.arizona.edu. Pre-existing; not worked around.**
@@ -95,3 +129,41 @@ JSON; a 400 is the honest outcome.
 
 **Removal trigger:** none needed in this repo. Retest after a gateway upgrade;
 if it starts working, delete this section.
+
+## Rate limit is reported as a 400 with a detail string, not a 429
+
+**Verified 2026-09-18 against genai.arizona.edu.**
+
+The gateway enforces **two** request tiers per end user, and overage is
+reported as HTTP **400**, not 429:
+
+- 20 requests per 60 s for the end user, with a reset timestamp:
+
+```
+{"detail":"Rate limit exceeded for end_user: josephmarbella@arizona.edu.
+Limit type: requests. Current limit: 20, Remaining: 0. Limit resets at:
+2026-09-18 15:54:15 UTC"}
+```
+
+- A tighter per-model tier (10 requests per minute) whose detail carries **no
+reset timestamp**:
+
+```
+{"detail":"Rate limit exceeded: 10 requests per minute. Please wait before
+trying again."}
+```
+
+No `Retry-After` and no `RateLimit-*` headers on either tier; where present,
+the window-reset time exists only inside the detail string. A rejected request
+does not consume a slot, and the windows reliably reopen at the advertised
+reset.
+
+**Workaround:** `is_rate_limit` / `RateLimitStall`
+(`src/open_webui/rate_limit.py`) treat this body — and any 429 — as a rate
+limit, stall pre-header requests until the advertised reset (budget
+`RATE_LIMIT_STALL_MAX_SECONDS`, default 300 s), and surface a 429 with
+`Retry-After` on exhaustion. See [ADR-0006](adr/0006-rate-limit-stall.md).
+
+**Removal trigger:** the gateway starts emitting a 429 with `Retry-After`
+(or `RateLimit-*` headers). Then drop the 400+detail sniff and keep the 429
+path.

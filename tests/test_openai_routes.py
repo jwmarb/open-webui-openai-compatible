@@ -536,7 +536,7 @@ class TestErrorResponseShape:
         assert err["code"] is None or isinstance(err["code"], int)
 
     def test_error_shape_http_status_errors(self):
-        for status_code in (400, 401, 403, 429, 500, 502, 503):
+        for status_code in (400, 401, 403, 500, 502, 503):
             async def make_raiser(sc=status_code, **kwargs):
                 raise openai.APIStatusError(
                     message=f"Error {sc}",
@@ -553,6 +553,29 @@ class TestErrorResponseShape:
                     )
                     assert response.status_code == status_code, f"Expected {status_code}, got {response.status_code}"
                     self._assert_openai_error_shape(response.json())
+
+    def test_error_shape_rate_limit_429(self):
+        """A 429 is a rate limit: after the stall budget it is a rate_limit_error (ADR-0006)."""
+        async def make_raiser(**kwargs):
+            raise openai.APIStatusError(
+                message="Error 429",
+                response=httpx.Response(429, request=_DUMMY_REQUEST),
+                body=None,
+            )
+
+        p_wc, p_oa = _patches(openai_handler=make_raiser)
+        with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
+            mock_settings.rate_limit_stall_max_seconds = 1
+            mock_settings.stream_empty_retry_max = 0
+            with TestClient(p_wc.build()) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "Hi"}]},
+                )
+        assert response.status_code == 429
+        err = response.json()["error"]
+        assert err["type"] == "rate_limit_error"
+        assert "Retry-After" in response.headers
 
     def test_error_shape_timeout(self):
         async def handler(**kwargs):
@@ -659,6 +682,7 @@ class TestStreamEmptyRetry:
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 3
+            mock_settings.rate_limit_stall_max_seconds = 0
             mock_settings.log_level = "WARNING"
             with TestClient(p_wc.build()) as tc:
                 response = tc.post(
@@ -684,6 +708,7 @@ class TestStreamEmptyRetry:
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 2
+            mock_settings.rate_limit_stall_max_seconds = 0
             mock_settings.log_level = "WARNING"
             with TestClient(p_wc.build()) as tc:
                 response = tc.post(
@@ -711,6 +736,7 @@ class TestStreamEmptyRetry:
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 0
+            mock_settings.rate_limit_stall_max_seconds = 0
             mock_settings.log_level = "WARNING"
             with TestClient(p_wc.build()) as tc:
                 response = tc.post(
@@ -734,6 +760,7 @@ class TestStreamEmptyRetry:
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 3
+            mock_settings.rate_limit_stall_max_seconds = 0
             mock_settings.log_level = "WARNING"
             with TestClient(p_wc.build()) as tc:
                 response = tc.post(
@@ -757,6 +784,7 @@ class TestStreamEmptyRetry:
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 3
+            mock_settings.rate_limit_stall_max_seconds = 0
             mock_settings.log_level = "WARNING"
             with TestClient(p_wc.build()) as tc:
                 response = tc.post(
@@ -785,6 +813,7 @@ class TestStreamEmptyRetry:
         p_wc, p_oa = _patches(openai_handler=handler)
         with p_wc, p_oa, patch("src.proxy.openai.routes.settings") as mock_settings:
             mock_settings.stream_empty_retry_max = 3
+            mock_settings.rate_limit_stall_max_seconds = 0
             mock_settings.log_level = "WARNING"
             with TestClient(p_wc.build()) as tc:
                 response = tc.post(

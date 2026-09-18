@@ -447,6 +447,7 @@ class TestMessagesStreaming:
 
         mock_settings = MagicMock()
         mock_settings.stream_empty_retry_max = 0
+        mock_settings.rate_limit_stall_max_seconds = 0
         mock_settings.log_level = "INFO"
 
         p_wc, p_oa = _patches(openai_handler=handler)

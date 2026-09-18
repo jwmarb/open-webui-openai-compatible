@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ...auth import get_current_token, request_refresh, should_refresh
 from ...errors import classify_upstream_error, log_upstream_error
+from ...open_webui.rate_limit import RateLimitStall
 from ...open_webui.request_policy import prepare_chat_body
 from ...settings import settings
 from ..openai.translator import apply_thinking_params, resolve_thinking_model
@@ -52,7 +53,16 @@ def _token_expired_error_response() -> JSONResponse:
         ),
         status_code=503,
     )
-
+def _rate_limit_exhausted_response(stall: RateLimitStall) -> JSONResponse:
+    """Build a 429 with Retry-After once the stall budget is spent (ADR-0006)."""
+    msg = "Upstream is rate limiting and the stall budget is exhausted."
+    if stall.last_detail:
+        msg += f" Last upstream response: {stall.last_detail}"
+    return JSONResponse(
+        content=create_anthropic_error(msg, "rate_limit_error"),
+        status_code=429,
+        headers={"Retry-After": str(stall.retry_after())},
+    )
 
 def _anthropic_error_response(exc: Exception, context: str) -> JSONResponse:
     log_upstream_error(exc, context)
@@ -111,6 +121,7 @@ async def _handle_streaming(
     model: str,
 ) -> JSONResponse | StreamingResponse:
     max_retries = settings.stream_empty_retry_max
+    stall = RateLimitStall(settings.rate_limit_stall_max_seconds)
     attempt = 0
 
     while True:
@@ -122,6 +133,16 @@ async def _handle_streaming(
         except Exception as exc:
             if _refresh_for(exc):
                 return _token_expired_error_response()
+            sleep = stall.sleep_for(exc)
+            if sleep is not None:
+                logger.warning(
+                    "Anthropic streaming create: upstream rate limited — stalling %.1f s (budget %d s)",
+                    sleep, settings.rate_limit_stall_max_seconds,
+                )
+                await asyncio.sleep(sleep)
+                continue
+            if stall.exhausted:
+                return _rate_limit_exhausted_response(stall)
             return _anthropic_error_response(exc, "Anthropic streaming create")
 
         first_chunk: Any = None
@@ -130,6 +151,16 @@ async def _handle_streaming(
         except Exception as exc:
             if _refresh_for(exc):
                 return _token_expired_error_response()
+            sleep = stall.sleep_for(exc)
+            if sleep is not None:
+                logger.warning(
+                    "Anthropic streaming first chunk: upstream rate limited — stalling %.1f s (budget %d s)",
+                    sleep, settings.rate_limit_stall_max_seconds,
+                )
+                await asyncio.sleep(sleep)
+                continue
+            if stall.exhausted:
+                return _rate_limit_exhausted_response(stall)
             if isinstance(exc, openai.APIStatusError) and 400 <= exc.status_code < 500:
                 return _anthropic_error_response(exc, "Anthropic streaming first chunk")
             attempt += 1
@@ -192,15 +223,27 @@ async def _handle_non_streaming(
     extra: dict[str, Any],
     model: str,
 ) -> JSONResponse:
-    try:
-        result = await ai_client.chat.completions.create(
-            **sdk_kwargs,
-            extra_body=extra or None,
-        )
+    stall = RateLimitStall(settings.rate_limit_stall_max_seconds)
+    while True:
+        try:
+            result = await ai_client.chat.completions.create(
+                **sdk_kwargs,
+                extra_body=extra or None,
+            )
+        except Exception as exc:
+            if _refresh_for(exc):
+                return _token_expired_error_response()
+            sleep = stall.sleep_for(exc)
+            if sleep is not None:
+                logger.warning(
+                    "Anthropic non-streaming: upstream rate limited — stalling %.1f s (budget %d s)",
+                    sleep, settings.rate_limit_stall_max_seconds,
+                )
+                await asyncio.sleep(sleep)
+                continue
+            if stall.exhausted:
+                return _rate_limit_exhausted_response(stall)
+            return _anthropic_error_response(exc, "Anthropic non-streaming")
         response_dict = result.model_dump(exclude_unset=True)
         anthropic_response = translate_response(response_dict, model)
         return JSONResponse(content=anthropic_response)
-    except Exception as exc:
-        if _refresh_for(exc):
-            return _token_expired_error_response()
-        return _anthropic_error_response(exc, "Anthropic non-streaming")

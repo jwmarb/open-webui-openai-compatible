@@ -29,6 +29,7 @@ jobs:
         env:
           OPEN_WEBUI_URL: "https://typecheck.example.com"
           USER_TOKEN: "typecheck-token"
+          RATE_LIMIT_STALL_MAX_SECONDS: "300"
 
   unit-tests:
     runs-on: ubuntu-latest

@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ...auth import get_current_token, request_refresh, should_refresh
 from ...errors import classify_upstream_error, log_upstream_error
+from ...open_webui.rate_limit import RateLimitStall
 from ...open_webui.request_policy import split_body_for_sdk
 from ...settings import settings
 from .errors import create_openai_error
@@ -57,7 +58,17 @@ def _token_expired_error_response() -> JSONResponse:
         503,
     )
     return JSONResponse(content=err, status_code=503)
-
+def _rate_limit_exhausted_response(stall: RateLimitStall) -> JSONResponse:
+    """Build a 429 with Retry-After once the stall budget is spent (ADR-0006)."""
+    msg = "Upstream is rate limiting and the stall budget is exhausted."
+    if stall.last_detail:
+        msg += f" Last upstream response: {stall.last_detail}"
+    err = create_openai_error(msg, "rate_limit_error", 429)
+    return JSONResponse(
+        content=err,
+        status_code=429,
+        headers={"Retry-After": str(stall.retry_after())},
+    )
 
 def _refresh_for(exc: openai.APIStatusError) -> bool:
     """Ask the token store to renew when a 401 shows positive token-fault evidence."""
@@ -224,6 +235,7 @@ async def _handle_streaming(
 ) -> JSONResponse | StreamingResponse:
     """Handle a streaming chat completion request with empty-stream retry."""
     max_retries = settings.stream_empty_retry_max
+    stall = RateLimitStall(settings.rate_limit_stall_max_seconds)
     attempt = 0
 
     while True:
@@ -235,6 +247,16 @@ async def _handle_streaming(
         except openai.APIStatusError as exc:
             if exc.status_code == 401 and _refresh_for(exc):
                 return _token_expired_error_response()
+            sleep = stall.sleep_for(exc)
+            if sleep is not None:
+                logger.warning(
+                    "Streaming create: upstream rate limited — stalling %.1f s (budget %d s)",
+                    sleep, settings.rate_limit_stall_max_seconds,
+                )
+                await asyncio.sleep(sleep)
+                continue
+            if stall.exhausted:
+                return _rate_limit_exhausted_response(stall)
             return _upstream_error_response(exc, "Streaming create")
         except Exception as exc:
             return _upstream_error_response(exc, "Streaming create")
@@ -246,6 +268,16 @@ async def _handle_streaming(
         except openai.APIStatusError as exc:
             if exc.status_code == 401 and _refresh_for(exc):
                 return _token_expired_error_response()
+            sleep = stall.sleep_for(exc)
+            if sleep is not None:
+                logger.warning(
+                    "Streaming first chunk: upstream rate limited — stalling %.1f s (budget %d s)",
+                    sleep, settings.rate_limit_stall_max_seconds,
+                )
+                await asyncio.sleep(sleep)
+                continue
+            if stall.exhausted:
+                return _rate_limit_exhausted_response(stall)
             if 400 <= exc.status_code < 500:
                 return _upstream_error_response(exc, "Streaming first chunk")
             attempt += 1
@@ -259,6 +291,17 @@ async def _handle_streaming(
                 continue
             return _upstream_error_response(exc, "Streaming first chunk")
         except Exception as exc:
+            if isinstance(exc, openai.APIStatusError):
+                sleep = stall.sleep_for(exc)
+                if sleep is not None:
+                    logger.warning(
+                        "Streaming first chunk: upstream rate limited — stalling %.1f s (budget %d s)",
+                        sleep, settings.rate_limit_stall_max_seconds,
+                    )
+                    await asyncio.sleep(sleep)
+                    continue
+                if stall.exhausted:
+                    return _rate_limit_exhausted_response(stall)
             if isinstance(exc, openai.APIStatusError) and 400 <= exc.status_code < 500:
                 return _upstream_error_response(exc, "Streaming first chunk")
             attempt += 1
@@ -304,11 +347,29 @@ async def _handle_non_streaming(
     extra: dict[str, Any],
 ) -> JSONResponse:
     """Handle a non-streaming chat completion request."""
-    try:
-        result = await ai_client.chat.completions.create(
-            **sdk_kwargs,
-            extra_body=extra or None,
-        )
+    stall = RateLimitStall(settings.rate_limit_stall_max_seconds)
+    while True:
+        try:
+            result = await ai_client.chat.completions.create(
+                **sdk_kwargs,
+                extra_body=extra or None,
+            )
+        except openai.APIStatusError as exc:
+            if exc.status_code == 401 and _refresh_for(exc):
+                return _token_expired_error_response()
+            sleep = stall.sleep_for(exc)
+            if sleep is not None:
+                logger.warning(
+                    "Non-streaming: upstream rate limited — stalling %.1f s (budget %d s)",
+                    sleep, settings.rate_limit_stall_max_seconds,
+                )
+                await asyncio.sleep(sleep)
+                continue
+            if stall.exhausted:
+                return _rate_limit_exhausted_response(stall)
+            return _upstream_error_response(exc, "Non-streaming")
+        except Exception as exc:
+            return _upstream_error_response(exc, "Non-streaming")
         response_dict = result.model_dump(exclude_unset=True)
         logger.info(
             "Non-streaming response received: model=%s choices=%d",
@@ -316,9 +377,3 @@ async def _handle_non_streaming(
             len(response_dict.get("choices", [])),
         )
         return JSONResponse(content=response_dict)
-    except openai.APIStatusError as exc:
-        if exc.status_code == 401 and _refresh_for(exc):
-            return _token_expired_error_response()
-        return _upstream_error_response(exc, "Non-streaming")
-    except Exception as exc:
-        return _upstream_error_response(exc, "Non-streaming")

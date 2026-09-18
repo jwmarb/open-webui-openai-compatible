@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     port: int = Field(default=8000, ge=1, le=65535)
     request_timeout: int = Field(default=300, ge=10, le=3600)
     stream_empty_retry_max: int = Field(default=3, ge=0, le=10)
+    rate_limit_stall_max_seconds: int = Field(default=300, ge=0, le=3600)
     log_level: str = Field(default="INFO")
 
     @field_validator("log_level")
