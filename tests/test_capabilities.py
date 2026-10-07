@@ -130,6 +130,62 @@ class TestEffortConfigGate:
         assert caps.requires_adaptive is False
 
 
+class TestThinkingDisplayGate:
+    """``defaults_to_omitted_thinking`` — the fourth, independent gate.
+
+    Claude 4.7+/5.x (and fable/mythos) hide their thinking text by default
+    (``thinking.display`` defaults to ``"omitted"``); 4.6 and earlier do not.
+    """
+
+    def test_claude_4_5_does_not_omit(self):
+        assert capabilities_for("bedrock-claude-4-5-haiku").defaults_to_omitted_thinking is False
+
+    def test_claude_4_6_does_not_omit(self):
+        assert capabilities_for("bedrock-claude-4-6-opus").defaults_to_omitted_thinking is False
+
+    def test_claude_4_7_omits(self):
+        assert capabilities_for("bedrock-claude-4-7-opus").defaults_to_omitted_thinking is True
+
+    def test_claude_5_omits(self):
+        assert capabilities_for("bedrock-claude-5-opus").defaults_to_omitted_thinking is True
+
+    def test_claude_5_5_omits(self):
+        assert capabilities_for("bedrock-claude-5-5-sonnet").defaults_to_omitted_thinking is True
+
+    def test_fable_omits(self):
+        assert capabilities_for("fable-5").defaults_to_omitted_thinking is True
+
+    def test_mythos_omits(self):
+        assert capabilities_for("mythos-5").defaults_to_omitted_thinking is True
+
+    def test_non_anthropic_does_not_omit(self):
+        for model in ("openai.gpt-5.6-luna", "gpt-oss-120b", "meta.llama3"):
+            assert capabilities_for(model).defaults_to_omitted_thinking is False, model
+
+    def test_display_gate_is_independent_of_adaptive_gates(self, monkeypatch):
+        """The display gate computes from its own floor constant, not from
+        ``requires_adaptive``. Monkeypatching the omitted-floor to 5.0
+        decouples the two gates on 4.7 models: ``requires_adaptive`` stays
+        True (4.7 >= 4.7) while ``defaults_to_omitted_thinking`` flips to
+        False (4.7 < 5.0).
+        """
+        import src.open_webui.capabilities as caps_module
+
+        caps_46 = capabilities_for("bedrock-claude-4-6-opus")
+        assert caps_46.requires_adaptive is False
+        assert caps_46.defaults_to_omitted_thinking is False
+
+        caps_47 = capabilities_for("bedrock-claude-4-7-opus")
+        assert caps_47.requires_adaptive is True
+        assert caps_47.defaults_to_omitted_thinking is True
+
+        # Decouple the floors to prove the gates are independently computed.
+        monkeypatch.setattr(caps_module, "_OMITTED_THINKING_MIN_VERSION", (5, 0))
+        caps_47_decoupled = capabilities_for("bedrock-claude-4-7-opus")
+        assert caps_47_decoupled.requires_adaptive is True
+        assert caps_47_decoupled.defaults_to_omitted_thinking is False
+
+
 class TestBaseModel:
     def test_base_model_excludes_suffix(self):
         assert capabilities_for("claude-x:adaptive").base_model == "claude-x"

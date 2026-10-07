@@ -72,39 +72,60 @@ Two separate rules, both empirical:
 **Removal trigger:** when `output_config: {effort}` returns 200 on
 `bedrock-claude-4-5-haiku`, delete `_EFFORT_CONFIG_MIN_VERSION` and the pass.
 
-## `:adaptive` produces zero reasoning on Claude 5.x
+## Claude 5.x hides its reasoning by default (`thinking.display="omitted"`)
 
-**Verified 2026-09-17 against genai.arizona.edu.**
+**Re-diagnosed 2026-10-06 against genai.arizona.edu (was "zero reasoning on
+Claude 5.x", misread 2026-09-17 as a reasoning defect).**
 
-| Request shape | claude-4-6-opus | claude-5-opus | claude-5-sonnet |
+The 5.x line (and 4.7+) **does** reason — the earlier `reasoning_tokens=0` was not
+a lack of reasoning, it was a *display* default. Anthropic's Messages API has a
+`thinking.display` field; on Claude Opus 4.7+/4.8, the 5.x and 5.5 lines, and
+fable/mythos it **defaults to `"omitted"`**: the model thinks, but the thinking
+text is withheld, so `reasoning_tokens` reads 0 and `reasoning_content` is empty.
+`Opus/Sonnet 4.6` and earlier default to `"summarized"` and return the text — which
+is why the same adaptive request looked fine on 4.6.
+
+| Request shape | claude-4-6-opus | claude-5-opus | claude-5-5-sonnet |
 | --- | --- | --- | --- |
-| `thinking: {type: adaptive}` | 200, `reasoning_tokens`=518, thinking text present | 200, `reasoning_tokens`=0, empty text | n/a |
-| adaptive + `output_config.effort: high/max` | n/a | 200, `reasoning_tokens`=0, empty text | 200, `reasoning_tokens`=0, empty text |
-| `thinking: {type: enabled, budget_tokens}` | 200, `reasoning_tokens`=104, thinking text present | 400 "Use adaptive and output_config.effort" | n/a |
+| `thinking: {type: adaptive}` | 200, real thinking | 200, `reasoning_tokens`=0, empty text | 200, `reasoning_tokens`=0, empty text |
+| `thinking: {type: adaptive, display: summarized}` | 200, real thinking | 200, **real thinking** | 200, **real thinking** |
+| adaptive + `display: summarized` + `output_config.effort: max` | n/a | 200, deeper thinking (effort honoured) | 200, real thinking |
+| `reasoning_effort` alone | 200, real thinking (default display) | 200, effort honoured but text hidden | 200, effort honoured but text hidden |
+| `reasoning_effort` + `thinking: {type: adaptive, display: summarized}` | n/a | 200, **real thinking** (proxy-injected shape verified 2026-10-06) | n/a |
+| `thinking: {type: enabled, budget_tokens}` | 200, real thinking | 400 "Use adaptive and output_config.effort" | n/a |
+| `thinking: {display: summarized}` (no type) | n/a | 400 `thinking.type: Field required` | n/a |
+| `thinking: {type: adaptive, display: bogus}` | n/a | 400 `display: Input should be 'summarized', 'omitted'` | n/a |
+| `thinking: {type: disabled, display: summarized}` | n/a | 400 `display: Extra inputs are not permitted` | n/a |
 
-The gateway **accepts** `thinking.type=adaptive` on the 5.x line (no error) but no
-reasoning happens: `usage.completion_tokens_details.reasoning_tokens` stays 0 and
-`reasoning_content` is empty, even with `output_config.effort: "max"` on problems
-that force extended work. The same request succeeds with real reasoning on 4.6.
-This is a LiteLLM/Bedrock upstream defect, not a translation bug: the proxy's
-injected body is exactly what was sent, and 4.6 proves the wiring works.
+This is **not** a proxy translation bug: the injected body is exactly what was
+sent, and `display="summarized"` restores the text on all four verified 5/5.5
+opus/sonnet models, non-streaming and streaming alike. LiteLLM derives
+`reasoning_tokens` from the thinking *text*, so a display-omitted block reports 0.
 
-Two signal pitfalls found while verifying:
+Signal pitfalls (carried over from the 2026-09-17 notes, now explained):
 
 - `thinking_blocks` appears in **every** response — including requests with no
   `thinking` param at all — carrying a signature and an empty `thinking` string.
-  Its presence is NOT evidence of thinking.
-- The reliable signals are `usage.completion_tokens_details.reasoning_tokens`
-  and `reasoning_content`.
+  That empty text is the `omitted` display, NOT evidence that no reasoning ran.
+- The reliable signals for *visible* reasoning are
+  `usage.completion_tokens_details.reasoning_tokens` and `reasoning_content`.
 
-**Workaround:** none in this repo. The `:adaptive` virtual variant on 5.x models
-silently delivers non-thinking answers; clients wanting guaranteed reasoning on
-this gateway should use `bedrock-claude-4-6-opus` (adaptive works) — the
-`requires_adaptive` gate does not change, so 5.x requests stay legal, they just
-run without reasoning.
+**Workaround (in this repo):** the thinking rewrite pass
+(`_reconcile_thinking` in `src/open_webui/request_policy.py`) adds
+`display="summarized"` for families that omit by default
+(`ModelCapabilities.defaults_to_omitted_thinking`), and only where reasoning was
+explicitly requested: it decorates an adaptive/enabled `thinking`, and synthesises
+`{type: adaptive, display: summarized}` when a depth control (`reasoning_effort` or
+`output_config.effort`) was supplied with no `thinking` key present.
+A client's own `display` (including `"omitted"`) and a `type="disabled"`
+are left untouched. 4.6 and earlier are unaffected (their default is already
+visible). When it synthesises thinking from a depth control, it also raises `max_tokens` to the 64k floor the gateway requires for adaptive thinking.
 
-**Removal trigger:** re-run the table. When adaptive on a 5.x model returns
-`reasoning_tokens > 0`, delete this section.
+**Removal trigger:** re-run the first table row on a 5.x/5.5 model. When adaptive
+*without* `display` returns `reasoning_tokens > 0` (i.e. Anthropic flips the
+default back to `"summarized"`), delete `_OMITTED_THINKING_MIN_VERSION`, the
+`defaults_to_omitted_thinking` gate, and the visibility branch of
+`_reconcile_thinking`.
 
 ## Structured output is broken upstream for Claude
 

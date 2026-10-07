@@ -178,6 +178,63 @@ class TestMessagesThinkingGate:
                 extra = captured.get("extra_body") or {}
                 assert extra["thinking"] == {"type": "enabled", "budget_tokens": 10000}
 
+    def test_adaptive_variant_adds_summarized_display_upstream(self):
+        """A Claude 5 ``:adaptive`` model is reconciled to *visible* thinking upstream.
+
+        The shared thinking pass adds ``display="summarized"`` because Claude 5 hides
+        its reasoning by default; the 64k max_tokens floor still applies.
+        """
+        captured: dict = {}
+
+        async def handler(**kwargs):
+            captured.update(kwargs)
+            return _completion()
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(p_wc.build()) as tc:
+                response = tc.post(
+                    "/v1/messages",
+                    json={
+                        "model": "bedrock-claude-5-5-sonnet:adaptive",
+                        "max_tokens": 1024,
+                        "messages": [{"role": "user", "content": "Hi"}],
+                    },
+                )
+                assert response.status_code == 200
+                assert captured["model"] == "bedrock-claude-5-5-sonnet"
+                extra = captured.get("extra_body") or {}
+                assert extra["thinking"] == {"type": "adaptive", "display": "summarized"}
+                assert "budget_tokens" not in extra["thinking"]
+                assert captured["max_tokens"] == 64000
+
+    def test_output_config_effort_injects_visible_adaptive_thinking_upstream(self):
+        """A depth-only Anthropic request gets visible adaptive thinking on Claude 5."""
+        captured: dict = {}
+
+        async def handler(**kwargs):
+            captured.update(kwargs)
+            return _completion()
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(p_wc.build()) as tc:
+                response = tc.post(
+                    "/v1/messages",
+                    json={
+                        "model": "bedrock-claude-5-5-sonnet",
+                        "max_tokens": 1024,
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "output_config": {"effort": "high"},
+                    },
+                )
+                assert response.status_code == 200
+                assert captured["model"] == "bedrock-claude-5-5-sonnet"
+                extra = captured.get("extra_body") or {}
+                assert extra["thinking"] == {"type": "adaptive", "display": "summarized"}
+                assert extra["output_config"] == {"effort": "high"}
+                assert captured["max_tokens"] == 64000
+
 
 class TestMessagesNonStreaming:
     def test_basic_text_response(self):

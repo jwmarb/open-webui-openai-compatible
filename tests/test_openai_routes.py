@@ -412,7 +412,36 @@ class TestChatCompletionsEndpoint:
                 extra = captured.get("extra_body", {})
                 assert extra["thinking"]["type"] == "adaptive"
                 assert "budget_tokens" not in extra["thinking"]
-                assert captured["max_tokens"] >= 64000
+                assert captured["max_tokens"] == 64000
+
+    def test_chat_thinking_variant_adaptive_5x_adds_display_e2e(self):
+        """A Claude 5 ``:adaptive`` variant is reconciled to *visible* thinking upstream.
+
+        The variant resolves to the base model and the injected thinking config
+        gains ``display="summarized"`` because Claude 5 hides its reasoning by default.
+        """
+        captured: dict = {}
+
+        async def handler(**kwargs):
+            captured.update(kwargs)
+            return _completion(model="opus")
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(p_wc.build()) as tc:
+                response = tc.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "bedrock-claude-5-opus:adaptive",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                    },
+                )
+                assert response.status_code == 200
+                assert captured["model"] == "bedrock-claude-5-opus"
+                extra = captured.get("extra_body", {})
+                assert extra["thinking"] == {"type": "adaptive", "display": "summarized"}
+                assert "budget_tokens" not in extra["thinking"]
+                assert captured["max_tokens"] == 64000
 
     def test_chat_strips_client_thinking_for_openai_model(self):
         captured: dict = {}

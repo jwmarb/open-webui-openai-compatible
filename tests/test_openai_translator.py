@@ -195,7 +195,7 @@ class TestSanitizeChatBody:
         assert "function_call" not in result
 
 
-class TestStripIncompatibleThinking:
+class TestReconcileThinking:
     def test_strips_thinking_for_openai_model(self):
         body = {
             "model": "openai.gpt-5.6-luna",
@@ -243,6 +243,62 @@ class TestStripIncompatibleThinking:
         body = {"model": "bedrock-claude-5-opus", "messages": [], "reasoning_effort": "high"}
         result = rewrite_chat_body(body)
         assert result["reasoning_effort"] == "high"
+
+    def test_noop_when_thinking_absent(self):
+        body = {"model": "openai.gpt-5.6-luna", "messages": []}
+        result = rewrite_chat_body(body)
+        assert "thinking" not in result
+
+    def test_coerces_enabled_to_adaptive_for_adaptive_only_model(self):
+        body = {
+            "model": "bedrock-claude-5-opus",
+            "messages": [],
+            "thinking": {"type": "enabled", "budget_tokens": 10000},
+        }
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == {"type": "adaptive", "display": "summarized"}
+
+    def test_coerces_enabled_to_adaptive_for_adaptive_only_sonnet(self):
+        body = {
+            "model": "bedrock-claude-5-sonnet",
+            "messages": [],
+            "thinking": {"type": "enabled", "budget_tokens": 32000},
+        }
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == {"type": "adaptive", "display": "summarized"}
+
+    def test_preserves_adaptive_for_adaptive_only_model(self):
+        body = {"model": "bedrock-claude-5-opus", "messages": [], "thinking": {"type": "adaptive"}}
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == {"type": "adaptive", "display": "summarized"}
+
+    def test_does_not_mutate_original_on_coercion(self):
+        body = {
+            "model": "bedrock-claude-5-opus",
+            "messages": [],
+            "thinking": {"type": "enabled", "budget_tokens": 10000},
+        }
+        rewrite_chat_body(body)
+        assert body["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+
+    def test_preserves_enabled_for_claude_4_6(self):
+        body = {
+            "model": "bedrock-claude-4-6-opus",
+            "messages": [],
+            "thinking": {"type": "enabled", "budget_tokens": 10000},
+        }
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+
+    def test_coerces_enabled_for_fable(self):
+        body = {"model": "claude-fable-5", "messages": [], "thinking": {"type": "enabled"}}
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == {"type": "adaptive", "display": "summarized"}
+
+    def test_leaves_non_dict_thinking_untouched_for_claude(self):
+        body = {"model": "bedrock-claude-5-opus", "messages": [], "thinking": "enabled"}
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == "enabled"
 
 
 class TestStripIncompatibleEffortConfig:
@@ -368,44 +424,50 @@ class TestStripIncompatibleEffortConfig:
         rewrite_chat_body(body)
         assert body["thinking"] == {"type": "enabled"}
 
-    def test_noop_when_thinking_absent(self):
-        body = {"model": "openai.gpt-5.6-luna", "messages": []}
-        result = rewrite_chat_body(body)
-        assert "thinking" not in result
 
-    def test_coerces_enabled_to_adaptive_for_adaptive_only_model(self):
-        body = {
-            "model": "bedrock-claude-5-opus",
-            "messages": [],
-            "thinking": {"type": "enabled", "budget_tokens": 10000},
-        }
-        result = rewrite_chat_body(body)
-        assert result["thinking"] == {"type": "adaptive"}
+class TestThinkingDisplayReconciliation:
+    """The thinking pass also makes reasoning visible for families that
+    default ``thinking.display`` to ``"omitted"`` (Claude 4.7+/5.x, fable/mythos).
+    """
 
-    def test_coerces_enabled_to_adaptive_for_adaptive_only_sonnet(self):
-        body = {
-            "model": "bedrock-claude-5-sonnet",
-            "messages": [],
-            "thinking": {"type": "enabled", "budget_tokens": 32000},
-        }
-        result = rewrite_chat_body(body)
-        assert result["thinking"] == {"type": "adaptive"}
-
-    def test_preserves_adaptive_for_adaptive_only_model(self):
+    def test_adaptive_gains_summarized_display_for_claude_5(self):
         body = {"model": "bedrock-claude-5-opus", "messages": [], "thinking": {"type": "adaptive"}}
         result = rewrite_chat_body(body)
+        assert result["thinking"] == {"type": "adaptive", "display": "summarized"}
+
+    def test_adaptive_does_not_gain_display_for_claude_4_6(self):
+        body = {"model": "bedrock-claude-4-6-opus", "messages": [], "thinking": {"type": "adaptive"}}
+        result = rewrite_chat_body(body)
         assert result["thinking"] == {"type": "adaptive"}
 
-    def test_does_not_mutate_original_on_coercion(self):
+    def test_preserves_client_omitted_display_on_adaptive(self):
         body = {
             "model": "bedrock-claude-5-opus",
             "messages": [],
-            "thinking": {"type": "enabled", "budget_tokens": 10000},
+            "thinking": {"type": "adaptive", "display": "omitted"},
         }
-        rewrite_chat_body(body)
-        assert body["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == {"type": "adaptive", "display": "omitted"}
 
-    def test_preserves_enabled_for_claude_4_6(self):
+    def test_preserves_client_summarized_display_on_adaptive(self):
+        body = {
+            "model": "bedrock-claude-5-opus",
+            "messages": [],
+            "thinking": {"type": "adaptive", "display": "summarized"},
+        }
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == {"type": "adaptive", "display": "summarized"}
+
+    def test_enabled_coercion_preserves_client_display(self):
+        body = {
+            "model": "bedrock-claude-5-opus",
+            "messages": [],
+            "thinking": {"type": "enabled", "budget_tokens": 10000, "display": "omitted"},
+        }
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == {"type": "adaptive", "display": "omitted"}
+
+    def test_enabled_coercion_does_not_gain_display_for_claude_4_6(self):
         body = {
             "model": "bedrock-claude-4-6-opus",
             "messages": [],
@@ -414,15 +476,89 @@ class TestStripIncompatibleEffortConfig:
         result = rewrite_chat_body(body)
         assert result["thinking"] == {"type": "enabled", "budget_tokens": 10000}
 
-    def test_coerces_enabled_for_fable(self):
-        body = {"model": "claude-fable-5", "messages": [], "thinking": {"type": "enabled"}}
+    def test_disabled_thinking_never_gets_display(self):
+        body = {"model": "bedrock-claude-5-opus", "messages": [], "thinking": {"type": "disabled"}}
         result = rewrite_chat_body(body)
-        assert result["thinking"] == {"type": "adaptive"}
+        assert result["thinking"] == {"type": "disabled"}
 
-    def test_leaves_non_dict_thinking_untouched_for_claude(self):
-        body = {"model": "bedrock-claude-5-opus", "messages": [], "thinking": "enabled"}
+    def test_reasoning_effort_injects_visible_adaptive_thinking(self):
+        body = {"model": "bedrock-claude-5-opus", "messages": [], "reasoning_effort": "high"}
         result = rewrite_chat_body(body)
-        assert result["thinking"] == "enabled"
+        assert result["reasoning_effort"] == "high"
+        assert result["thinking"] == {"type": "adaptive", "display": "summarized"}
+
+    def test_reasoning_effort_none_does_not_inject_thinking(self):
+        body = {"model": "bedrock-claude-5-opus", "messages": [], "reasoning_effort": "none"}
+        result = rewrite_chat_body(body)
+        assert "thinking" not in result
+
+    def test_reasoning_effort_no_injection_for_claude_4_6(self):
+        body = {"model": "bedrock-claude-4-6-opus", "messages": [], "reasoning_effort": "high"}
+        result = rewrite_chat_body(body)
+        assert result["reasoning_effort"] == "high"
+        assert "thinking" not in result
+
+    def test_non_string_reasoning_effort_does_not_inject_thinking(self):
+        body = {"model": "bedrock-claude-5-opus", "messages": [], "reasoning_effort": 3}
+        result = rewrite_chat_body(body)
+        assert "thinking" not in result
+
+    def test_non_anthropic_reasoning_effort_does_not_inject_thinking(self):
+        body = {"model": "openai.gpt-4o", "messages": [], "reasoning_effort": "high"}
+        result = rewrite_chat_body(body)
+        assert "thinking" not in result
+
+    def test_injected_thinking_does_not_mutate_original(self):
+        body = {"model": "bedrock-claude-5-opus", "messages": [], "reasoning_effort": "high"}
+        rewrite_chat_body(body)
+        assert "thinking" not in body
+
+    def test_reasoning_effort_empty_string_does_not_inject_thinking(self):
+        body = {"model": "bedrock-claude-5-opus", "messages": [], "reasoning_effort": ""}
+        result = rewrite_chat_body(body)
+        assert "thinking" not in result
+
+    def test_reasoning_effort_none_capitalised_does_not_inject_thinking(self):
+        body = {"model": "bedrock-claude-5-opus", "messages": [], "reasoning_effort": "NONE"}
+        result = rewrite_chat_body(body)
+        assert "thinking" not in result
+
+    def test_output_config_effort_injects_visible_adaptive_thinking(self):
+        body = {"model": "bedrock-claude-5-opus", "messages": [], "output_config": {"effort": "high"}}
+        result = rewrite_chat_body(body)
+        assert result["output_config"] == {"effort": "high"}
+        assert result["thinking"] == {"type": "adaptive", "display": "summarized"}
+
+    def test_injected_thinking_raises_max_tokens_floor(self):
+        body = {"model": "bedrock-claude-5-opus", "messages": [], "reasoning_effort": "high", "max_tokens": 512}
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert result["max_tokens"] == 64_000
+
+    def test_injected_thinking_does_not_lower_existing_max_tokens(self):
+        body = {"model": "bedrock-claude-5-opus", "messages": [], "reasoning_effort": "high", "max_tokens": 100_000}
+        result = rewrite_chat_body(body)
+        assert result["max_tokens"] == 100_000
+
+    def test_injected_thinking_raises_max_completion_tokens_floor(self):
+        body = {
+            "model": "bedrock-claude-5-opus",
+            "messages": [],
+            "reasoning_effort": "high",
+            "max_completion_tokens": 512,
+        }
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert result["max_completion_tokens"] == 64_000
+        assert "max_tokens" not in result
+
+    def test_typeless_thinking_dict_blocks_synthesis(self):
+        """A `thinking` dict with no `type` is left inert: no display is added
+        and no synthesis runs, so the client error surfaces upstream unchanged."""
+        body = {"model": "bedrock-claude-5-opus", "messages": [], "thinking": {}, "reasoning_effort": "high"}
+        result = rewrite_chat_body(body)
+        assert result["thinking"] == {}
+        assert result["reasoning_effort"] == "high"
 
 
 class TestGenerateThinkingVariants:
@@ -557,6 +693,12 @@ class TestApplyThinkingParams:
         body = apply_thinking_params(
             {"model": "m", "max_completion_tokens": 100000}, ThinkingConfig(type="adaptive"))
         assert "max_tokens" not in body or body["max_tokens"] == 100000
+
+    def test_bumps_max_completion_tokens_when_too_low(self):
+        body = apply_thinking_params(
+            {"model": "m", "max_completion_tokens": 512}, ThinkingConfig(type="adaptive"))
+        assert body["max_completion_tokens"] == 64000
+        assert "max_tokens" not in body
 
 
 class TestBedrockToolScrubbing:

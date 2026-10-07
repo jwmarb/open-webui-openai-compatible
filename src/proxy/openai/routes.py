@@ -22,13 +22,12 @@ from ...open_webui.rate_limit import (
     record_upstream_admission,
     record_upstream_rejection,
 )
-from ...open_webui.request_policy import split_body_for_sdk
+from ...open_webui.request_policy import prepare_chat_body
 from ...settings import settings
 from .errors import create_openai_error
 from .translator import (
     apply_thinking_params,
     resolve_thinking_model,
-    rewrite_chat_body,
     translate_models_response,
 )
 
@@ -208,11 +207,9 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
         len(raw_body.get("messages", [])),
     )
     logger.debug("Raw request body keys: %s", list(raw_body.keys()))
-    body: dict[str, Any] = rewrite_chat_body(raw_body)
-    logger.debug("Sanitized body keys: %s", list(body.keys()))
-
-    model = body.get("model", "")
+    model = raw_body.get("model", "")
     base_model, thinking_config = resolve_thinking_model(model)
+    body: dict[str, Any] = {**raw_body}
     if base_model != model:
         body["model"] = base_model
     if thinking_config is not None:
@@ -220,12 +217,16 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
                     model, base_model, thinking_config)
         body = apply_thinking_params(body, thinking_config)
 
+    # Variant resolution runs before gateway policy so the injected thinking
+    # config is itself reconciled (e.g. given a visible display) upstream.
+    sdk_kwargs, extra = prepare_chat_body(body)
+    logger.debug("Sanitized body keys: %s", sorted(sdk_kwargs) + sorted(extra))
+
     is_stream = body.get("stream") is True
     logger.debug("Forwarding to upstream: model=%s stream=%s",
                  body.get("model"), is_stream)
 
     ai_client: openai.AsyncOpenAI = request.app.state.openai_client
-    sdk_kwargs, extra = split_body_for_sdk(body)
 
     if is_stream:
         return await _handle_streaming(ai_client, sdk_kwargs, extra)

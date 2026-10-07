@@ -35,6 +35,12 @@ SDK_KNOWN_PARAMS: Final[frozenset[str]] = frozenset({
     "stream_options", "metadata", "store", "service_tier",
 })
 
+# The gateway rejects a max_tokens too small to hold a thinking block, so any
+# request that carries (or is given) adaptive thinking needs this headroom.
+# Shared by the :adaptive variant path (proxy.openai.translator) and the
+# reasoning-effort injection in _reconcile_thinking.
+MIN_MAX_TOKENS_ADAPTIVE: Final[int] = 64_000
+
 _UNSUPPORTED_FIELDS: Final[frozenset[str]] = frozenset({"vector_store_ids", "file_ids"})
 
 _REASONING_CONTROL_FIELDS: Final[tuple[str, ...]] = (
@@ -115,36 +121,94 @@ def _ensure_stream_usage(body: dict[str, Any], caps: ModelCapabilities) -> dict[
     return body
 
 
-def _strip_incompatible_thinking(body: dict[str, Any], caps: ModelCapabilities) -> dict[str, Any]:
-    """Reconcile a client-supplied ``thinking`` param with what the model accepts.
+def _meaningful_effort(value: Any) -> str | None:
+    """Return the depth value if it is a non-empty, non-'none' effort string."""
+    if isinstance(value, str) and value.strip().lower() not in ("", "none"):
+        return value
+    return None
 
-    ``thinking`` is Anthropic-only. Open WebUI forwards unknown top-level params
-    verbatim, so sending it to an OpenAI-family model hard-fails with
-    400 ``unknown_parameter: 'thinking'``; it is dropped. Adaptive-only Claude
-    families reject ``type="enabled"`` just as hard, so that is coerced. Both
-    keep the request usable instead of guaranteeing a 400.
+
+def _reconcile_thinking(body: dict[str, Any], caps: ModelCapabilities) -> dict[str, Any]:
+    """Reconcile the client's thinking/reasoning controls with what the model accepts.
+
+    Two jobs, both load-bearing:
+
+    1. *Legality.* ``thinking`` is Anthropic-only, so it is dropped for
+       OpenAI-family models (upstream 400s on the unknown top-level param).
+       Adaptive-only families reject ``type="enabled"`` with the same 400, so it
+       is coerced to ``type="adaptive"`` — a client ``display`` is kept, but
+       ``budget_tokens`` is not, since the adaptive form takes no budget.
+
+    2. *Visibility.* Claude 4.7+/5.x (and fable/mythos) default
+       ``thinking.display`` to ``"omitted"``: the model reasons, but the text is
+       withheld, so ``reasoning_tokens`` reads 0 and clients see no thinking.
+       For those families we surface explicitly requested reasoning by adding
+       ``display="summarized"`` — to an adaptive/enabled ``thinking``, or by
+       synthesising one when a depth control (``reasoning_effort`` or
+       ``output_config.effort``) was supplied without a ``thinking``. A
+       client's own ``display`` (including ``"omitted"``) and a
+       ``type="disabled"`` are left untouched.
     """
-    if "thinking" not in body:
-        return body
-
     if not caps.supports_thinking:
-        body.pop("thinking", None)
-        logger.warning(
-            "Stripped client-supplied 'thinking' param for non-Anthropic model %r "
-            "(parameter is Anthropic-only and would be rejected upstream)",
-            body.get("model", ""),
-        )
+        if "thinking" in body:
+            body.pop("thinking", None)
+            logger.warning(
+                "Stripped client-supplied 'thinking' param for non-Anthropic model %r "
+                "(parameter is Anthropic-only and would be rejected upstream)",
+                body.get("model", ""),
+            )
         return body
 
     thinking = body.get("thinking")
-    if caps.requires_adaptive and isinstance(thinking, dict) and thinking.get("type") == "enabled":
-        body["thinking"] = {"type": "adaptive"}
-        logger.warning(
-            "Coerced client-supplied thinking.type='enabled' to 'adaptive' for %r "
-            "(family rejects enabled thinking; use output_config.effort for depth)",
+    if isinstance(thinking, dict):
+        if caps.requires_adaptive and thinking.get("type") == "enabled":
+            coerced: dict[str, Any] = {"type": "adaptive"}
+            if "display" in thinking:
+                coerced["display"] = thinking["display"]
+            body["thinking"] = coerced
+            logger.warning(
+                "Coerced client-supplied thinking.type='enabled' to 'adaptive' for %r "
+                "(family rejects enabled thinking; use output_config.effort for depth)",
+                body.get("model", ""),
+            )
+            thinking = coerced
+
+        if (
+            caps.defaults_to_omitted_thinking
+            # `"enabled"` is defensive: requires_adaptive families coerce
+            # enabled→adaptive above, so only adaptive reaches this today.
+            and thinking.get("type") in ("adaptive", "enabled")
+            and "display" not in thinking
+        ):
+            body["thinking"] = {**thinking, "display": "summarized"}
+            logger.info(
+                "Added thinking.display='summarized' for %r: this family hides its "
+                "thinking text by default, so the reasoning would otherwise be lost",
+                body.get("model", ""),
+            )
+        return body
+
+    effort = _meaningful_effort(body.get("reasoning_effort"))
+    if effort is None:
+        output_config = body.get("output_config")
+        if isinstance(output_config, dict):
+            effort = _meaningful_effort(output_config.get("effort"))
+    if caps.defaults_to_omitted_thinking and effort is not None:
+        # No usable `thinking`: surface the depth request by synthesising visible
+        # adaptive thinking, and give it the headroom the gateway requires.
+        body["thinking"] = {"type": "adaptive", "display": "summarized"}
+        effective_max = body.get("max_completion_tokens") or body.get("max_tokens") or 0
+        if effective_max < MIN_MAX_TOKENS_ADAPTIVE:
+            if "max_completion_tokens" in body:
+                body["max_completion_tokens"] = MIN_MAX_TOKENS_ADAPTIVE
+            else:
+                body["max_tokens"] = MIN_MAX_TOKENS_ADAPTIVE
+        logger.info(
+            "Injected thinking={type: adaptive, display: summarized} for %r to make "
+            "the requested reasoning effort visible (this family hides thinking text "
+            "by default)",
             body.get("model", ""),
         )
-
     return body
 
 
@@ -225,7 +289,7 @@ def _strip_session_id(body: dict[str, Any], caps: ModelCapabilities) -> dict[str
 
 _PASSES: Final[tuple[Any, ...]] = (
     _strip_unsupported_fields,
-    _strip_incompatible_thinking,
+    _reconcile_thinking,
     _strip_incompatible_reasoning_effort,
     _strip_incompatible_effort_config,
     _scrub_bedrock_tool_fields,

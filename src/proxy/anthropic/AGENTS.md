@@ -10,7 +10,7 @@ Vocabulary: [`CONTEXT.md`](../../../CONTEXT.md).
 
 1. `translate_request(raw_body)` → canonical (OpenAI-shaped) body.
 2. `resolve_thinking_model()` + `apply_thinking_params()` — strips `:adaptive` and injects the thinking config. **Without this the suffix reached upstream as a literal model ID and 404'd.** `:extended` is no longer recognised anywhere.
-3. `prepare_chat_body()` → the eight **rewrite passes** plus the SDK/`extra_body` split, in one call.
+3. `prepare_chat_body()` → the eight **rewrite passes** plus the SDK/`extra_body` split, in one call. The shared thinking pass also adds `display="summarized"` to the injected thinking config for families that hide thinking by default (Claude 4.7+/5.x, fable/mythos), so a `:adaptive` request returns visible reasoning.
 4. `_handle_streaming` (`:122`) or `_handle_non_streaming` (`:230`).
 
 ## Cross-package imports — all public
@@ -81,4 +81,4 @@ The 6 SSE event classes, `AnthropicRequest`, and every request-side content-bloc
 - Translation order is load-bearing: `translate_request` → thinking resolution → `prepare_chat_body`. Do not reorder.
 - Never emit a content block while another is open, and never emit an index out of order — Anthropic clients accumulate per open block.
 - Every new Anthropic API feature needs a matching translation mapping here. That is the accepted ongoing cost of the translation approach (ADR-0001).
-- Package tests: `tests/test_anthropic_translator.py` (55 tests), `tests/test_anthropic_routes.py` (25 tests). Both run in CI.
+- Package tests: `tests/test_anthropic_translator.py` (55 tests), `tests/test_anthropic_routes.py` (27 tests). Both run in CI.

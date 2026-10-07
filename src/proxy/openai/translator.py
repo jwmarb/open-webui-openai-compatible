@@ -15,16 +15,13 @@ from ...open_webui.capabilities import (
     capabilities_for,
     split_thinking_suffix,
 )
-from ...open_webui.request_policy import rewrite_chat_body
+from ...open_webui.request_policy import MIN_MAX_TOKENS_ADAPTIVE, rewrite_chat_body
 from .models import OpenAIModel, OpenAIModelList, ThinkingConfig
 
 logger = logging.getLogger(__name__)
 
 ADAPTIVE_THINKING_CONFIG = ThinkingConfig(type="adaptive")
 
-# Adaptive thinking lets the model decide its own depth, but it still needs
-# headroom: the gateway rejects a max_tokens too small to hold a thinking block.
-MIN_MAX_TOKENS_ADAPTIVE = 64_000
 
 __all__ = [
     "ADAPTIVE_THINKING_CONFIG",
@@ -79,9 +76,12 @@ def resolve_thinking_model(model: str) -> tuple[str, ThinkingConfig | None]:
 def apply_thinking_params(body: dict[str, Any], thinking_config: ThinkingConfig) -> dict[str, Any]:
     body = {**body, "thinking": thinking_config.model_dump(exclude_none=True)}
 
-    current_max = body.get("max_tokens") or body.get("max_completion_tokens") or 0
-    if current_max < MIN_MAX_TOKENS_ADAPTIVE:
-        body["max_tokens"] = MIN_MAX_TOKENS_ADAPTIVE
+    effective_max = body.get("max_completion_tokens") or body.get("max_tokens") or 0
+    if effective_max < MIN_MAX_TOKENS_ADAPTIVE:
+        if "max_completion_tokens" in body:
+            body["max_completion_tokens"] = MIN_MAX_TOKENS_ADAPTIVE
+        else:
+            body["max_tokens"] = MIN_MAX_TOKENS_ADAPTIVE
 
     return body
 

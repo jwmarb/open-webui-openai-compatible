@@ -37,6 +37,22 @@ not. This does not line up with either adaptive gate — 4.6 accepts the effort
 config while still permitting `thinking.type="enabled"` — so all three gates stay
 separate comparisons. Verified 2026-09-06 against genai.arizona.edu.
 
+**`defaults_to_omitted_thinking` is a fourth, independent gate.** It answers a
+different question from the adaptive gates: not *which thinking type is legal*
+(`requires_adaptive`) but *whether visible output requires an explicit display
+mode*. Claude Opus 4.7+/4.8, the 5.x and 5.5 lines, and fable/mythos default
+`thinking.display` to `"omitted"` — the model reasons, but the text is withheld
+(`reasoning_tokens=0`, `reasoning_content` empty). Opus/Sonnet 4.6 and earlier
+default to `"summarized"` and return the text. The floor is 4.7, with the
+always-capable fable/mythos path, and it must **not** be collapsed into
+`requires_adaptive`: today the two happen to agree on the Opus/Sonnet lines, but
+`requires_adaptive` is about legality (a hard 400) while the display gate is
+about visibility (a silent empty block) — conflating them would couple a
+legality rule to a presentation rule. The rewrite pass uses this gate to add
+`display="summarized"` so explicitly requested reasoning is not lost. Verified
+2026-10-06 against genai.arizona.edu (5-opus/5-sonnet/5-5-*); 4.7+ and
+fable/mythos per the Anthropic thinking docs.
+
 ## Consequences
 
 - Both frontends resolve the `:adaptive` variant the same way.
@@ -44,8 +60,9 @@ separate comparisons. Verified 2026-09-06 against genai.arizona.edu.
   Haiku `small_context` gate that existed only to size those budgets. Nothing
   else depended on them.
 - A new Anthropic family is one entry in one frozenset.
-- Three gates now derive from the same version tuple with three different
-  thresholds (4.6 adaptive-capable, 4.7 adaptive-only, 4.6 effort-config). They
+- Four gates now derive from the same version tuple with four different
+  thresholds (4.6 adaptive-capable, 4.7 adaptive-only, 4.6 effort-config, 4.7
+  omitted-display). They
   are cheap to compare and expensive to conflate.
 - The rules are empirical and will drift as the gateway changes. They belong in
   one module with tests, not spread across request-rewriting passes.

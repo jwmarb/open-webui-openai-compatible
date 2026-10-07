@@ -4,11 +4,11 @@
 
 | File | Tests | Asserts | Targets |
 |---|---|---|---|
-| `test_openai_translator.py` | 93 | 148 | `src.translator` / `src.models` shims → `proxy.openai` |
+| `test_openai_translator.py` | 114 | 177 | `src.translator` / `src.models` shims → `proxy.openai` |
 | `test_anthropic_translator.py` | 55 | 129 | `proxy.anthropic.translator`, incl. `StreamingState` |
-| `test_openai_routes.py` | 36 | 88 | `/v1/models`, `/v1/chat/completions` |
-| `test_anthropic_routes.py` | 25 | 75 | `/v1/messages` |
-| `test_capabilities.py` | 29 | 40 | `src.open_webui.capabilities` |
+| `test_openai_routes.py` | 37 | 93 | `/v1/models`, `/v1/chat/completions` |
+| `test_anthropic_routes.py` | 27 | 85 | `/v1/messages` |
+| `test_capabilities.py` | 38 | 54 | `src.open_webui.capabilities` |
 | `test_auth.py` | 20 | 21 | `src.auth` token store |
 | `test_refresh_trigger.py` | 17 | 25 | 401 → refresh, single-flight, atomic write |
 | `test_rate_limit.py` | 38 | 94 | `src.open_webui.rate_limit` detection/stall budget + both route seams (stall → 429 + `Retry-After`) |

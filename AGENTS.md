@@ -95,8 +95,8 @@ open-webui-openai-compatible/
 | `src/auth.py` | Token store and refresh protocol. Public: `get_current_token` (`:127`), `should_refresh` (`:160`), `request_refresh` (`:178`), `write_token_file` (`:87`), `get_token_expiry`, `is_token_expired_or_invalid`, `get_token_file_path`, `extract_error_code` |
 | `src/errors.py` | `classify_upstream_error`, `log_upstream_error`. Transport-neutral — imports no frontend |
 | `src/open_webui/rate_limit.py` | `is_rate_limit` (`:102`), `RateLimitStall` (`:229`), `SlidingWindowTracker` (`:150`) — stall budget + slot-aware scheduling, ADR-0006, ADR-0007 |
-| `src/open_webui/capabilities.py` | `capabilities_for()` (`:94`) → frozen `ModelCapabilities` (`:56`) |
-| `src/open_webui/request_policy.py` | `rewrite_chat_body` (`:238`), `split_body_for_sdk` (`:254`), `prepare_chat_body` (`:266`), `SDK_KNOWN_PARAMS` (`:29`) |
+| `src/open_webui/capabilities.py` | `capabilities_for()` (`:106`) → frozen `ModelCapabilities` (`:67`) |
+| `src/open_webui/request_policy.py` | `rewrite_chat_body` (`:301`), `split_body_for_sdk` (`:317`), `prepare_chat_body` (`:329`), `SDK_KNOWN_PARAMS` (`:29`) |
 | `src/main.py` | `UpstreamClients` (`:44`), `build_upstream_clients` (`:53`), `create_app` (`:70`), `app = create_app()` (`:97`), `_TokenAuth` (`:35`) |
 | `src/proxy/openai/errors.py` | `create_openai_error` — OpenAI wire format only |
 | `src/models.py`, `src/translator.py` | Back-compat re-export shims (`# noqa: F401`). Consumed only by `tests/test_openai_translator.py` |
@@ -178,7 +178,7 @@ When adding a **required** settings field, update `tests/conftest.py` and the CI
 4. `AsyncOpenAI.chat.completions.create()` forwards upstream.
 5. Chat responses pass through, or are translated back for Anthropic; only the model list is reshaped.
 
-The eight passes run in this exact order and the order is load-bearing: strip unsupported fields → reconcile incompatible `thinking` → strip incompatible reasoning controls → strip incompatible `output_config.effort` → scrub Bedrock tool fields → inject stream usage → inject `chat_id` → strip `session_id`. Each receives a `ModelCapabilities` value rather than re-deriving the model family. Details in `src/proxy/openai/AGENTS.md`.
+The eight passes run in this exact order and the order is load-bearing: strip unsupported fields → reconcile `thinking` type and visibility → strip incompatible reasoning controls → strip incompatible `output_config.effort` → scrub Bedrock tool fields → inject stream usage → inject `chat_id` → strip `session_id`. Each receives a `ModelCapabilities` value rather than re-deriving the model family. Details in `src/proxy/openai/AGENTS.md`.
 
 ## Streaming
 
@@ -200,19 +200,20 @@ Error mapping: `APIStatusError` → preserve status · `APITimeoutError` → 504
 
 Models that accept adaptive thinking get ONE virtual variant appended to `/v1/models`: `:adaptive`. The suffix is stripped before forwarding by **both** frontends. `:extended` was removed — it is no longer generated or recognised, so `model:extended` now reaches upstream verbatim and 400s.
 
-Three distinct capability gates, and they are NOT the same line:
+Four distinct capability gates, and they are NOT the same line:
 
 | Gate | Meaning | Applies to | Used by |
 | --- | --- | --- | --- |
 | `supports_adaptive` | model ACCEPTS `type="adaptive"` | Opus/Sonnet >= 4.6, `fable`, `mythos` | variant generation + suffix resolution |
 | `requires_adaptive` | model REJECTS `type="enabled"` | Opus/Sonnet >= **4.7**, `fable`, `mythos` | coercing a CLIENT-supplied `thinking` |
 | `accepts_effort_config` | model ACCEPTS `output_config.effort` | any non-Anthropic, or Claude >= **4.6** | stripping `output_config.effort` |
+| `defaults_to_omitted_thinking` | model HIDES thinking text by default (`display="omitted"`) | Opus/Sonnet >= **4.7**, `fable`, `mythos` | adding `display="summarized"` to surface requested reasoning |
 
 Claude 4.6 accepts BOTH thinking modes; 4.7+ accepts ONLY adaptive. `requires_adaptive` is still load-bearing without `:extended`, because a client may send `thinking.type="enabled"` itself.
 
-`accepts_effort_config` lines up with neither: Claude 4.5 and earlier 400 on `output_config.effort` outright, 4.6 accepts it and silently IGNORES it, and only 5.x acts on it. The floor is 4.6 because accepting-and-ignoring is harmless while rejecting is not — so a 4.6 model both permits `type="enabled"` AND takes the effort config. Verified 2026-09-06 against genai.arizona.edu. Do not collapse these three. Rationale: [ADR-0004](docs/adr/0004-model-capability-inference.md).
+`accepts_effort_config` lines up with neither: Claude 4.5 and earlier 400 on `output_config.effort` outright, 4.6 accepts it and silently IGNORES it, and only 5.x acts on it. The floor is 4.6 because accepting-and-ignoring is harmless while rejecting is not — so a 4.6 model both permits `type="enabled"` AND takes the effort config. Verified 2026-09-06 against genai.arizona.edu. `defaults_to_omitted_thinking` is a fourth, independent line: it is about *visibility*, not legality — 4.7+/5.x hide their thinking text by default (`reasoning_tokens=0`, empty `reasoning_content`) even though the request is legal, so the rewrite pass must ask for `display="summarized"` to surface it; 4.6 and earlier already return it. Verified 2026-10-06 against genai.arizona.edu. Do not collapse these four. Rationale: [ADR-0004](docs/adr/0004-model-capability-inference.md).
 
-A client-supplied `thinking` param is stripped for non-Anthropic models (it is Anthropic-only and Open WebUI forwards unknown top-level params verbatim, producing `400 unknown_parameter: 'thinking'`). On adaptive-only families a client-supplied `type="enabled"` is coerced to `{"type": "adaptive"}`.
+A client-supplied `thinking` param is stripped for non-Anthropic models (it is Anthropic-only and Open WebUI forwards unknown top-level params verbatim, producing `400 unknown_parameter: 'thinking'`). On adaptive-only families a client-supplied `type="enabled"` is coerced to `type="adaptive"` (a client `display` is kept, `budget_tokens` dropped). On families that hide thinking by default, a `display="summarized"` is added to an adaptive/enabled `thinking` — and synthesised when only a `reasoning_effort` was supplied — so explicitly requested reasoning is not lost; a client's own `display` and a `type="disabled"` are left untouched.
 
 `reasoning_effort` passes through untouched except on the `gpt-5.6` line, where ALL reasoning and verbosity controls are stripped because that family is served via Bedrock Converse and accepts none of them. **Consequence:** gpt-5.6 runs at its default reasoning effort and the depth cannot be steered; a client asking for `xhigh` gets default and the request succeeds. Full verification table and removal trigger: [`docs/upstream-compatibility.md`](docs/upstream-compatibility.md).
 

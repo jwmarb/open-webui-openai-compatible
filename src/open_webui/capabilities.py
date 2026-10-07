@@ -9,7 +9,10 @@ recorded in `docs/adr/0004-model-capability-inference.md`.
 is separate and still needed even without variants: Claude 4.7+ rejects a
 client-supplied `thinking.type="enabled"`, which the request policy coerces.
 `accepts_effort_config` is a third, independent line: Claude 4.5 and earlier
-reject `output_config.effort` outright.
+reject `output_config.effort` outright. `defaults_to_omitted_thinking` is a
+fourth, independent line: Claude 4.7+/5.x (and fable/mythos) hide their
+thinking text by default, so the request policy must ask for `display=`
+`"summarized"` to surface it.
 """
 
 from __future__ import annotations
@@ -43,6 +46,16 @@ _ADAPTIVE_ALWAYS_CAPABLE: Final[frozenset[str]] = frozenset({"fable", "mythos"})
 # and ignoring is harmless, rejecting is not.
 _EFFORT_CONFIG_MIN_VERSION: Final[tuple[int, int]] = (4, 6)
 
+# Claude 4.7+ and the 5.x line default `thinking.display` to "omitted": the
+# model reasons, but the thinking text is withheld (signature present, text
+# empty, reasoning_tokens=0). Opus/Sonnet 4.6 and earlier default to
+# "summarized". Fable/Mythos are always-capable and also default to omitted.
+# Verified 2026-10-06 against genai.arizona.edu (5-opus/5-sonnet/5-5-*);
+# 4.7+ and fable/mythos per the Anthropic thinking docs.
+# The floor is consulted only for opus/sonnet lines (_adaptive_version returns
+# (0,0) for every other line), so Haiku models resolve to False here.
+_OMITTED_THINKING_MIN_VERSION: Final[tuple[int, int]] = (4, 7)
+
 # Bounded to two digits so trailing date stamps ("...-4-6-20250514") are not
 # misread as versions.
 _VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(r"(?<!\d)(\d{1,2})(?:-(\d{1,2}))?(?!\d)")
@@ -60,6 +73,7 @@ class ModelCapabilities:
     requires_adaptive: bool
     accepts_reasoning_controls: bool
     accepts_effort_config: bool
+    defaults_to_omitted_thinking: bool
 
     @property
     def supports_thinking(self) -> bool:
@@ -104,4 +118,5 @@ def capabilities_for(model_id: str) -> ModelCapabilities:
         requires_adaptive=version >= _ADAPTIVE_ONLY_MIN_VERSION,
         accepts_reasoning_controls=not _REASONING_INCOMPATIBLE_RE.search(normalized),
         accepts_effort_config=not is_anthropic or version >= _EFFORT_CONFIG_MIN_VERSION,
+        defaults_to_omitted_thinking=version >= _OMITTED_THINKING_MIN_VERSION,
     )
