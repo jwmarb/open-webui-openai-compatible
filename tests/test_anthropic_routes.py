@@ -129,6 +129,171 @@ def _patches(*, openai_handler=None):
     return factory, factory
 
 
+class TestCountTokens:
+    """POST /v1/messages/count_tokens — local estimate; upstream is never called."""
+
+    def test_plain_message_is_estimated_and_never_reaches_upstream(self):
+        async def handler(**kwargs):
+            raise AssertionError("count_tokens must not call upstream")
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(p_wc.build()) as tc:
+                text = "Hello there, this is a token counting test."
+                response = tc.post(
+                    "/v1/messages/count_tokens",
+                    json={"model": "bedrock-claude-5-opus", "messages": [{"role": "user", "content": text}]},
+                )
+                assert response.status_code == 200
+                assert response.json() == {"input_tokens": max(1, len(text) // 4)}
+
+    def test_only_text_blocks_contribute(self):
+        async def handler(**kwargs):
+            raise AssertionError("count_tokens must not call upstream")
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(p_wc.build()) as tc:
+                response = tc.post(
+                    "/v1/messages/count_tokens",
+                    json={
+                        "model": "bedrock-claude-5-opus",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "aaaa"},
+                                    {"type": "tool_use", "id": "t1", "name": "ignored", "input": {"x": 1}},
+                                    {"type": "thinking", "thinking": "bbbb", "signature": "s"},
+                                ],
+                            }
+                        ],
+                    },
+                )
+                assert response.status_code == 200
+                assert response.json() == {"input_tokens": max(1, 4 // 4)}
+
+    def test_system_list_and_tool_schema_are_counted(self):
+        async def handler(**kwargs):
+            raise AssertionError("count_tokens must not call upstream")
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(p_wc.build()) as tc:
+                system_text = "sys"
+                message_text = "msg"
+                name = "tool_name"
+                description = "a tool"
+                schema = {"type": "object", "properties": {}}
+                expected_chars = (
+                    len(system_text) + len(message_text) + len(name) + len(description) + len(json.dumps(schema))
+                )
+                response = tc.post(
+                    "/v1/messages/count_tokens",
+                    json={
+                        "model": "bedrock-claude-5-opus",
+                        "system": [
+                            {"type": "text", "text": system_text},
+                            {"type": "document", "source": {}},
+                        ],
+                        "messages": [{"role": "user", "content": message_text}],
+                        "tools": [{"name": name, "description": description, "input_schema": schema}],
+                    },
+                )
+                assert response.status_code == 200
+                assert response.json() == {"input_tokens": max(1, expected_chars // 4)}
+
+    def test_empty_messages_returns_400(self):
+        async def handler(**kwargs):
+            raise AssertionError("count_tokens must not call upstream")
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(p_wc.build()) as tc:
+                response = tc.post(
+                    "/v1/messages/count_tokens",
+                    json={"model": "bedrock-claude-5-opus", "messages": []},
+                )
+                assert response.status_code == 400
+                body = response.json()
+                assert body["type"] == "error"
+                assert body["error"]["type"] == "invalid_request_error"
+
+    def test_invalid_messages_shapes_return_400(self):
+        async def handler(**kwargs):
+            raise AssertionError("count_tokens must not call upstream")
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(p_wc.build()) as tc:
+                payloads = [
+                    {"model": "m"},
+                    {"model": "m", "messages": None},
+                    {"model": "m", "messages": "not-a-list"},
+                    {"model": "m", "messages": [{"role": "user"}, "nope"]},
+                ]
+                for payload in payloads:
+                    response = tc.post("/v1/messages/count_tokens", json=payload)
+                    assert response.status_code == 400, payload
+                    body = response.json()
+                    assert body["type"] == "error"
+                    assert body["error"]["type"] == "invalid_request_error"
+
+    def test_non_dict_body_returns_400(self):
+        async def handler(**kwargs):
+            raise AssertionError("count_tokens must not call upstream")
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(p_wc.build()) as tc:
+                response = tc.post(
+                    "/v1/messages/count_tokens",
+                    json=[{"role": "user", "content": "hi"}],
+                )
+                assert response.status_code == 400
+                body = response.json()
+                assert body["type"] == "error"
+                assert body["error"]["type"] == "invalid_request_error"
+    def test_short_content_hits_floor_one(self):
+        """Two chars → 2//4=0 → clamped to 1 by the max(1, …) floor."""
+
+        async def handler(**kwargs):
+            raise AssertionError("count_tokens must not call upstream")
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(p_wc.build()) as tc:
+                response = tc.post(
+                    "/v1/messages/count_tokens",
+                    json={"model": "m", "messages": [{"role": "user", "content": "ab"}]},
+                )
+                assert response.status_code == 200
+                assert response.json() == {"input_tokens": 1}
+
+    def test_string_system_is_counted(self):
+        """A string ``system`` field contributes to the character count."""
+
+        async def handler(**kwargs):
+            raise AssertionError("count_tokens must not call upstream")
+
+        p_wc, p_oa = _patches(openai_handler=handler)
+        with p_wc, p_oa:
+            with TestClient(p_wc.build()) as tc:
+                system = "A" * 20
+                message = "B" * 20
+                response = tc.post(
+                    "/v1/messages/count_tokens",
+                    json={
+                        "model": "m",
+                        "system": system,
+                        "messages": [{"role": "user", "content": message}],
+                    },
+                )
+                assert response.status_code == 200
+                assert response.json() == {"input_tokens": max(1, (len(system) + len(message)) // 4)}
+
+
+
 class TestMessagesThinkingGate:
     """The ``thinking`` strip lives in rewrite_chat_body, which /v1/messages also calls."""
 

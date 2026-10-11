@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ruff
-      - run: ruff check src/ tests/ playwright_login.py
+      - run: ruff check src/ tests/ playwright_login.py examples/litellm/register_models.py
 
   typecheck:
     runs-on: ubuntu-latest

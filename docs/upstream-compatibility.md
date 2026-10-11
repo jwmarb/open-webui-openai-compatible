@@ -207,3 +207,24 @@ until the next slot. See [ADR-0006](adr/0006-rate-limit-stall.md) and
 **Removal trigger:** the gateway starts emitting a 429 with `Retry-After`
 (or `RateLimit-*` headers). Then drop the 400+detail sniff and keep the 429
 path.
+
+## Anthropic `count_tokens` is served by a local estimate
+
+**Added 2026-10-10. Verified against genai.arizona.edu that no tokenizer API is exposed.**
+
+Anthropic clients (and LiteLLM's anthropic provider) may call
+`POST /v1/messages/count_tokens`. Open WebUI exposes no tokenizer API, so the
+proxy answers this route itself: it validates `messages` (missing, non-list,
+non-dict entries → Anthropic-formatted 400) and returns a local estimate —
+`max(1, total_chars // 4)` over the payload's text fields (string `system` or
+its text blocks, string message `content` or text content blocks, and each
+tool's `name`, `description`, and serialised `input_schema`). No upstream
+request is made, so it never stalls on backend rate limits.
+
+**Why approximate:** without a shared tokenizer, any count is an estimate. It exists so downstream tooling (token budgets, context-window guards) has a fast, stable answer instead of a 404.
+
+**Known skew:** `tool_use` block `input` payloads and `tool_result` block `content` are not counted. In agentic sessions these can be the largest component of the context; a guard relying on this estimate will under-report exactly when the context is nearly full.
+
+**Removal trigger:** Open WebUI exposes a tokenizer API (e.g.
+`/api/models/tokenize`). Replace the heuristic with a call to it and keep the
+same route contract.

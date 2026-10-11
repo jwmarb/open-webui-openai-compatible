@@ -1,17 +1,19 @@
 # src/proxy/anthropic/
 
-The Anthropic Messages API **frontend**: `POST /v1/messages` (routes.py:92). Translates Anthropic requests into a **canonical body**, sends them upstream via the OpenAI SDK, and translates responses back. Design rationale: [ADR-0001](../../../docs/adr/0001-anthropic-api-frontend-via-translation.md).
+The Anthropic Messages API **frontend**: two routes — `POST /v1/messages` (routes.py:168) and `POST /v1/messages/count_tokens` (routes.py:138, a local estimate that never calls upstream). `/v1/messages` translates Anthropic requests into a **canonical body**, sends them upstream via the OpenAI SDK, and translates responses back. Design rationale: [ADR-0001](../../../docs/adr/0001-anthropic-api-frontend-via-translation.md).
 
 Vocabulary: [`CONTEXT.md`](../../../CONTEXT.md).
 
 ## Route flow
 
-`routes.py:91-115`, in this order — the order is load-bearing:
+`routes.py:169-194`, in this order — the order is load-bearing:
 
 1. `translate_request(raw_body)` → canonical (OpenAI-shaped) body.
 2. `resolve_thinking_model()` + `apply_thinking_params()` — strips `:adaptive` and injects the thinking config. **Without this the suffix reached upstream as a literal model ID and 404'd.** `:extended` is no longer recognised anywhere.
 3. `prepare_chat_body()` → the eight **rewrite passes** plus the SDK/`extra_body` split, in one call. The shared thinking pass also adds `display="summarized"` to the injected thinking config for families that hide thinking by default (Claude 4.7+/5.x, fable/mythos), so a `:adaptive` request returns visible reasoning.
-4. `_handle_streaming` (`:122`) or `_handle_non_streaming` (`:230`).
+4. `_handle_streaming` (`:199`) or `_handle_non_streaming` (`:307`).
+
+`count_tokens` (`routes.py:138-166`) bypasses all of the above: it validates `messages` (missing/non-list/non-dict entries → Anthropic-formatted 400) and returns `max(1, total_chars // 4)` over the payload's text fields (string `system` or its text blocks, string message `content` or text content blocks, each tool's `name`/`description`/serialised `input_schema`). No translation, no thinking resolution, no backend policy, no stall, no upstream client — Open WebUI exposes no tokenizer API, so this is an intentional local estimate (see `docs/upstream-compatibility.md`).
 
 ## Cross-package imports — all public
 
@@ -21,11 +23,11 @@ Vocabulary: [`CONTEXT.md`](../../../CONTEXT.md).
 
 No private symbol crosses a package seam. The former `from ..openai.routes import _split_body_for_sdk` is gone.
 
-Still duplicated with `../openai/routes.py`, keep in sync: `_SSE_HEADERS` (`:35` ↔ `:37`), `_RETRY_BACKOFF_CAP` (`:119` ↔ `:42`).
+Still duplicated with `../openai/routes.py`, keep in sync: `_SSE_HEADERS` (`:35` ↔ `:37`), `_RETRY_BACKOFF_CAP` (`:196` ↔ `:42`).
 
 ## 401 handling — now symmetric with the OpenAI route
 
-`_refresh_for` (`:43`) returns True when the exception is a 401 **and** `should_refresh(get_current_token(), exc.body)` finds positive token-fault evidence; it then calls `request_refresh()`. `_token_expired_error_response` (`:53`) returns **503** in Anthropic error format. Three call sites: streaming create (`:142`), streaming first-chunk (`:162`), non-streaming (`:247`).
+`_refresh_for` (`:43`) returns True when the exception is a 401 **and** `should_refresh(get_current_token(), exc.body)` finds positive token-fault evidence; it then calls `request_refresh()`. `_token_expired_error_response` (`:53`) returns **503** in Anthropic error format. Three call sites: streaming create (`:219`), streaming first-chunk (`:239`), non-streaming (`:324`).
 
 A 401 without token evidence (e.g. `model_access_denied`) still passes through as a 401. The earlier asymmetry — where an Anthropic-only client never triggered a refresh — is fixed.
 
@@ -73,7 +75,8 @@ The 6 SSE event classes, `AnthropicRequest`, and every request-side content-bloc
 | Add an Anthropic request parameter | `translator.py` `translate_request`. If the key is not in `SDK_KNOWN_PARAMS` (`../../open_webui/request_policy.py:29`) it routes to `extra_body` |
 | Add a content block type | Request side: `_translate_content_blocks` (`translator.py:73`). Response side: `translate_response` (`:261`) |
 | Change error shape | `create_anthropic_error` (`translator.py:24`) + `_anthropic_error_response` (`routes.py:72`) |
-| Streaming lifecycle | `StreamingState` + `_handle_streaming` (`routes.py:122`) |
+| Streaming lifecycle | `StreamingState` + `_handle_streaming` (`routes.py:199`) |
+| Change the token-count estimate | `_count_tokens_chars` (`routes.py:91`) + the `count_tokens` route (`:138`) — local only, no upstream |
 
 ## Constraints / gotchas
 
@@ -81,4 +84,4 @@ The 6 SSE event classes, `AnthropicRequest`, and every request-side content-bloc
 - Translation order is load-bearing: `translate_request` → thinking resolution → `prepare_chat_body`. Do not reorder.
 - Never emit a content block while another is open, and never emit an index out of order — Anthropic clients accumulate per open block.
 - Every new Anthropic API feature needs a matching translation mapping here. That is the accepted ongoing cost of the translation approach (ADR-0001).
-- Package tests: `tests/test_anthropic_translator.py` (55 tests), `tests/test_anthropic_routes.py` (27 tests). Both run in CI.
+- Package tests: `tests/test_anthropic_translator.py` (55 tests), `tests/test_anthropic_routes.py` (35 tests, incl. `TestCountTokens`). Both run in CI.

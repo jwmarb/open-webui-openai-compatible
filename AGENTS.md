@@ -13,7 +13,7 @@ Nested guides: [`src/proxy/openai/AGENTS.md`](src/proxy/openai/AGENTS.md) · [`s
 pip install ".[dev]"
 
 # Lint + typecheck (lint covers the sidecar; pyright covers src/ only)
-ruff check src/ tests/ playwright_login.py
+ruff check src/ tests/ playwright_login.py examples/litellm/register_models.py
 pyright src/
 
 # Unit tests — exactly what CI runs
@@ -104,14 +104,15 @@ open-webui-openai-compatible/
 
 **Dependency direction:** `main → routes → {auth, errors, settings, open_webui} → models`. Both frontends depend on `open_webui`; `open_webui` depends on neither. Nothing in `src/` root imports a frontend — `errors.py` no longer reaches into `proxy/openai/models.py`, and no private symbol crosses a package seam.
 
-### Routes — exactly 4
+### Routes — exactly 5
 
 | Route | Defined at | Upstream |
 |-------|-----------|----------|
 | `GET /health` | `main.py:91` | — |
 | `GET /v1/models` | `proxy/openai/routes.py:170` | `GET /api/models` (injected httpx client) |
 | `POST /v1/chat/completions` | `proxy/openai/routes.py:202` | `POST /api/chat/completions` (openai SDK) |
-| `POST /v1/messages` | `proxy/anthropic/routes.py:92` | `POST /api/chat/completions` (openai SDK) |
+| `POST /v1/messages` | `proxy/anthropic/routes.py:168` | `POST /api/chat/completions` (openai SDK) |
+| `POST /v1/messages/count_tokens` | `proxy/anthropic/routes.py:138` | — (local estimate, no upstream call) |
 
 No `/v1/models/{id}`, no embeddings, no CORS middleware. The proxy deliberately avoids Open WebUI's own `/v1/*` paths — those require an `sk-` API key, not a JWT. `AsyncOpenAI.base_url` is `{open_webui_url}/api` so the SDK's `/chat/completions` lands on `/api/chat/completions`.
 
@@ -228,7 +229,7 @@ A client-supplied `thinking` param is stripped for non-Anthropic models (it is A
 
 ## CI pipeline
 
-`.github/workflows/ci.yml` — 4 jobs on Python 3.12. `lint` (`ruff check src/ tests/ playwright_login.py`), `typecheck` (`pyright src/`, dummy env vars), and `unit-tests` run in parallel; `integration-tests` fans in after all three. Integration is double-guarded: a job-level `if` blocks fork PRs, and a shell null check exits 0 when secrets are absent. No build, push, cache, or deploy.
+`.github/workflows/ci.yml` — 4 jobs on Python 3.12. `lint` (`ruff check src/ tests/ playwright_login.py examples/litellm/register_models.py`), `typecheck` (`pyright src/`, dummy env vars), and `unit-tests` run in parallel; `integration-tests` fans in after all three. Integration is double-guarded: a job-level `if` blocks fork PRs, and a shell null check exits 0 when secrets are absent. No build, push, cache, or deploy.
 
 `unit-tests` runs `pytest tests/ --ignore=tests/integration --ignore=tests/test_playwright_login.py`, so every unit file is covered except the one needing a real browser. The former gap where `test_auth`, `test_refresh_trigger` and `test_capabilities` never ran in CI is closed.
 
@@ -238,7 +239,7 @@ A client-supplied `thinking` param is stripped for non-Anthropic models (it is A
 - Error responses use each frontend's own format. The backend module must never format a wire-format error, or the coupling it removed comes back.
 - Never put `USER_TOKEN` in a log or error message. Token values are never logged.
 - `max_retries=0` on `AsyncOpenAI` (`main.py`) — the proxy owns retries. Raising it double-fires them.
-- `_SSE_HEADERS` must stay on every `StreamingResponse` or streaming breaks behind nginx/Caddy. It is defined **twice** (`proxy/openai/routes.py:37`, `proxy/anthropic/routes.py:35`), as is `_RETRY_BACKOFF_CAP` (`:42` / `:119`) — keep them in sync.
+- `_SSE_HEADERS` must stay on every `StreamingResponse` or streaming breaks behind nginx/Caddy. It is defined **twice** (`proxy/openai/routes.py:37`, `proxy/anthropic/routes.py:35`), as is `_RETRY_BACKOFF_CAP` (`:42` / `:196`) — keep them in sync.
 - Do not remove these suppressions: `settings.py:39` `[call-arg]`; the `[union-attr]` and `[arg-type]` ignores in both routes files.
 - Adding an upstream parameter requires adding it to `SDK_KNOWN_PARAMS` (`open_webui/request_policy.py:29`) or it silently routes to `extra_body`.
 - Docker: compose builds `Dockerfile.playwright`. `docker compose down -v` deletes the volume holding the token **and** the browser profile, forcing a full interactive Duo login next start.

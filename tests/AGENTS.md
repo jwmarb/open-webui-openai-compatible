@@ -7,7 +7,7 @@
 | `test_openai_translator.py` | 114 | 177 | `src.translator` / `src.models` shims → `proxy.openai` |
 | `test_anthropic_translator.py` | 55 | 129 | `proxy.anthropic.translator`, incl. `StreamingState` |
 | `test_openai_routes.py` | 37 | 93 | `/v1/models`, `/v1/chat/completions` |
-| `test_anthropic_routes.py` | 27 | 85 | `/v1/messages` |
+| `test_anthropic_routes.py` | 35 | 104 | `/v1/messages`, `/v1/messages/count_tokens` |
 | `test_capabilities.py` | 38 | 54 | `src.open_webui.capabilities` |
 | `test_auth.py` | 20 | 21 | `src.auth` token store |
 | `test_refresh_trigger.py` | 17 | 25 | 401 → refresh, single-flight, atomic write |
@@ -108,6 +108,7 @@ All five set `pytestmark = [skip_without_real_instance, pytest.mark.flaky(reruns
 | `/v1/chat/completions`, `/v1/models`, SSE, retry | `test_openai_routes.py` |
 | Anthropic request/response translation, stream lifecycle | `test_anthropic_translator.py` |
 | `/v1/messages` behaviour, suffix stripping, 401 refresh | `test_anthropic_routes.py` |
+| `count_tokens` estimate, validation, no-upstream | `test_anthropic_routes.py` (`TestCountTokens`) |
 | Token file/env fallback, expiry | `test_auth.py` |
 | 401 → refresh, lock ownership, atomic write, reaping | `test_refresh_trigger.py` |
 | Rate-limit detection, stall budget, 429 exhaustion | `test_rate_limit.py` |

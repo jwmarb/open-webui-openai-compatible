@@ -96,6 +96,7 @@ This builds the image from the provided Dockerfile and runs the proxy in detache
 | `/v1/models` | GET | List available models (OpenAI-compatible) |
 | `/v1/chat/completions` | POST | Chat completions (supports streaming) |
 | `/v1/messages` | POST | Anthropic Messages API (supports streaming) |
+| `/v1/messages/count_tokens` | POST | Anthropic token counting (local estimate, no upstream call) |
 
 ### Curl Examples 📡
 
@@ -143,6 +144,50 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 - Thinking content that the model returns on its own is still translated back to clients — this only removes the proxy-generated request variant.
 - The `thinking` parameter is Anthropic-only. If you send it for a non-Anthropic model (e.g. a GPT model), the proxy strips it and logs a warning — without this, the provider rejects the request with `400 unknown_parameter: 'thinking'`.
 - To control reasoning depth on OpenAI reasoning models, send the standard `reasoning_effort` string (`low`/`medium`/`high`, plus `xhigh` and `none` on newer models). The proxy passes it through untouched, and Open WebUI supports it natively. Note that valid values are model-dependent — `minimal` is rejected by GPT-5.5 and GPT-5.6, and non-reasoning models such as `gpt-4o` reject the parameter entirely.
+
+## Using with LiteLLM 🔌
+
+The proxy works as the upstream for a LiteLLM gateway. Register the gateway's Claude models so LiteLLM's Anthropic provider recognises them as thinking-capable (its built-in model list doesn't know Bedrock-style IDs like `bedrock-claude-5-opus`, and will otherwise reject `thinking`/`reasoning_effort` before they reach the proxy):
+
+```yaml
+# litellm-config.yaml
+model_list:
+  - model_name: bedrock-claude-5-opus
+    litellm_params:
+      model: anthropic/bedrock-claude-5-opus
+      api_base: http://localhost:8000   # proxy root — LiteLLM appends /v1/messages
+      api_key: dummy                    # the proxy authenticates to Open WebUI itself
+  # …one entry per exposed Claude model (sonnet, 4.6, 5.5, …)
+
+litellm_settings:
+  success_callback: ["register_models.RegisterGatewayModels"]
+```
+
+```bash
+# register_models.py (in examples/litellm) registers the models at import time
+PYTHONPATH=<repo>/examples/litellm litellm --config litellm-config.yaml
+```
+
+With the registration in place, requests flow through LiteLLM natively:
+
+```bash
+# Adaptive thinking via LiteLLM's native thinking param
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer sk-1234" -H "Content-Type: application/json" \
+  -d '{"model":"bedrock-claude-5-opus","messages":[{"role":"user","content":"Explain the Riemann hypothesis"}],"thinking":{"type":"adaptive"}}'
+
+# …or control depth directly
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer sk-1234" -H "Content-Type: application/json" \
+  -d '{"model":"bedrock-claude-5-opus","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"medium"}'
+```
+
+Reasoning comes back as `reasoning_content` in non-streaming responses and as `reasoning_content` deltas in streaming. `/v1/messages/count_tokens` is also served locally, so LiteLLM's token-counting paths work without an upstream call.
+
+Notes:
+- The `api_key` can be any dummy value — the proxy authenticates to Open WebUI with its own JWT.
+- Streaming and tool use work through the gateway as well.
+- If you prefer not to register models, you can also use the proxy's `:adaptive` suffix (e.g. `openai/bedrock-claude-5-opus:adaptive`) on the OpenAI endpoint — the proxy strips the suffix and injects the thinking parameters itself, with no LiteLLM-side plumbing.
 
 ## Testing 🧪
 
@@ -214,7 +259,8 @@ All other request fields are passed through to upstream unchanged.
 
 - **Renewal depends on a persisted browser session** — Automatic renewal reuses the Shibboleth SSO session stored in the sidecar's browser profile, so it normally needs no interaction. If that session and the Duo "trusted browser" cookie both lapse, the next renewal requires approving a Duo Push on your phone. Deleting the browser profile forces a full interactive login.
 - **No individual model lookup** — Only `/v1/models` (list all) is supported. There is no `/v1/models/{id}` endpoint.
-- **No embeddings, audio, or image endpoints** — The proxy only covers `/v1/models` and `/v1/chat/completions`. All other OpenAI API endpoints are unavailable.
+- **No embeddings, audio, or image endpoints** — The proxy covers `/v1/models`, `/v1/chat/completions`, `/v1/messages`, and `/v1/messages/count_tokens`. All other OpenAI API endpoints are unavailable.
+- **`/v1/messages/count_tokens` is an estimate** — Open WebUI exposes no tokenizer API, so the count is a local chars/4 heuristic over the request's text (plus tool schemas), not Anthropic's exact tokenizer. Fine for budgets and guards; not exact.
 
 ## License 📜
 

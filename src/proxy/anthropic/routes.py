@@ -88,6 +88,83 @@ def _sse_event(event_type: str, data: dict[str, Any]) -> bytes:
     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n".encode()
 
 
+def _count_tokens_chars(body: dict[str, Any]) -> int:
+    """Count the payload characters of an Anthropic request body.
+
+    Only text fields count: a string ``system`` or its text blocks, string
+    message ``content`` or text content blocks, and each tool's ``name``,
+    ``description`` and serialized ``input_schema``. Roles, block type keys
+    and non-text blocks are not counted.
+    """
+    total = 0
+
+    system = body.get("system")
+    if isinstance(system, str):
+        total += len(system)
+    elif isinstance(system, list):
+        for block in system:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str):
+                    total += len(text)
+
+    for message in body.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        total += len(text)
+
+    for tool in body.get("tools") or []:
+        if not isinstance(tool, dict):
+            continue
+        for key in ("name", "description"):
+            value = tool.get(key)
+            if isinstance(value, str):
+                total += len(value)
+        schema = tool.get("input_schema")
+        if schema is not None:
+            total += len(json.dumps(schema))
+
+    return total
+
+
+@router.post("/v1/messages/count_tokens", response_model=None)
+async def count_tokens(request: Request) -> JSONResponse:
+    """Local Anthropic count-tokens endpoint — an estimate, no upstream call.
+
+    Open WebUI exposes no tokenizer API, so this answers with a chars/4
+    heuristic (floor of 1) over the request's text payload. See
+    ``docs/upstream-compatibility.md``.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+
+    if not isinstance(body, dict):
+        return JSONResponse(
+            content=create_anthropic_error("Body must be a JSON object."),
+            status_code=400,
+        )
+
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages or not all(isinstance(m, dict) for m in messages):
+        return JSONResponse(
+            content=create_anthropic_error("messages must be a non-empty list of message objects."),
+            status_code=400,
+        )
+
+    logger.debug("POST /v1/messages/count_tokens — model=%s", body.get("model", "?"))
+    return JSONResponse(content={"input_tokens": max(1, _count_tokens_chars(body) // 4)})
+
+
 @router.post("/v1/messages", response_model=None)
 async def messages(request: Request) -> JSONResponse | StreamingResponse:
     raw_body = await request.json()
